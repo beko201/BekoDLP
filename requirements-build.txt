@@ -1,9 +1,0 @@
-# Application and Windows executable build tools, verified 2026-11-18.
--r requirements-windows.lock.txt
-PyInstaller==6.22.3
-packaging==26.3
-setuptools==84.2.1
-altgraph==0.17.5
-pefile==2024.8.26; sys_platform == 'win32'
-pyinstaller-hooks-contrib==2026.10
-pywin32-ctypes==0.2.3; sys_platform == 'win32'
