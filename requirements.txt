@@ -1,7 +1,0 @@
-# ManagedYoutubeDL uses private APIs; update only after integration tests pass.
-yt-dlp==2026.10.26
-yt-dlp-ejs==0.8.0
-curl-cffi==0.17.0
-psutil==7.2.2
-Unidecode==1.4.0
-PySide6==6.12.0
