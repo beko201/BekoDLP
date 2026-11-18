@@ -1,0 +1,8 @@
+"""Application identity and release version."""
+
+APP_NAME = 'BekoDLP'
+APP_VERSION = '1.0'
+
+# Public GitHub Releases feed. Keep the asset name unchanged between releases.
+UPDATE_REPOSITORY = 'beko201/BekoDLP'
+UPDATE_ASSET_NAME = 'BekoDLP-Windows-x64.exe'
