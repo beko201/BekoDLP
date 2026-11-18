@@ -1,0 +1,56 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.cache/
+
+# Virtual environments and local IDE files
+.venv/
+venv/
+env/
+ENV/
+.tox/
+.nox/
+.idea/
+
+# Local environment configuration (keep example files shareable)
+.env
+.env.*
+!.env.example
+
+# Build outputs, package metadata and generated release archives
+/build/
+/dist/
+.eggs/
+*.egg-info/
+/BekoDLP*.exe
+/BekoDLP*.zip
+
+# Application logs and personal settings, including backups/recovery files
+errors.log*
+debug.log*
+yd_settings.json*
+
+# Downloaded runtime and temporary executable-update files
+/tools/runtime/
+.bekodlp-update-*/
+.bekofetch-update-*/
+
+# Generated screenshots and local resource measurements
+/docs/ui-previews/
+/docs/resource-*.json
+/benchmark-results*.json
+
+# Test coverage reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
