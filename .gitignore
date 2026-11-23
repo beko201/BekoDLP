@@ -33,6 +33,7 @@ ENV/
 errors.log*
 debug.log*
 yd_settings.json*
+yd_queue.json*
 
 # Downloaded runtime and temporary executable-update files
 /tools/runtime/
