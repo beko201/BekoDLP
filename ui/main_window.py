@@ -1,19 +1,24 @@
 """English/Turkish Qt interface connected to the toolkit-independent task manager."""
 import os
+import threading
 from collections import deque
 from pathlib import Path
 
 from app_info import APP_NAME
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout,
+    QFileDialog, QHBoxLayout, QComboBox,
     QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
     QSplitter, QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
 from media_options import validate_output_options
+from cookie_options import validate_cookie_options
+from subtitle_options import validate_subtitle_options
+from network_options import validate_network_options
+from naming_templates import validate_naming_options
 from ui.output_controls import OutputControls
 from ui.options_scroll import OptionsScrollArea
 from ui.i18n import register, set_language, tr
@@ -25,8 +30,15 @@ from ui.file_actions import reveal_file, open_folder
 from ui.diagnostics import (copy_error_details, open_log_folder, export_diagnostic_report,
                             add_diagnostic_buttons)
 from ui.preferences import Preferences
+from ui.queue_persistence import QueuePersistence
 from ui.thumbnails import ThumbnailLoader
 from ui.updates import UpdateController
+from ui.tool_updates import ToolUpdateController
+from ui.completion_actions import CompletionActions, ACTION_LABELS
+from ui.source_formats_dialog import SourceFormatsDialog
+from ui.playlist_selection import PlaylistSelectionDialog
+from task_manager import TaskOptions
+from urllib.parse import urlsplit
 from utils import SETTINGS_FILE, log_warning, log_location_text
 
 
@@ -41,6 +53,7 @@ class MainWindow(QMainWindow):
         self._pending_messages = deque()
         self._last_error_details = ''
         self._preferences_closed = False
+        self._queue_closed = False
         self._preview_tid = None
         self.language = 'en'
         self._notice_source = 'Ready'
@@ -52,6 +65,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 680)
         self.folder = ""
         self.bulk_dialog = None
+        self.source_dialog = None
+        self.playlist_dialog = None
         central = QWidget(self)
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -74,9 +89,12 @@ class MainWindow(QMainWindow):
         self.enqueue_button.setObjectName("primaryButton")
         self.bulk_button = QPushButton("Add multiple links", self)
         self.bulk_button.clicked.connect(self.open_bulk_dialog)
+        self.source_button = QPushButton('Source formats…', self)
+        self.source_button.clicked.connect(self.open_source_formats)
         link_row.addWidget(self.url_edit, 1)
         link_row.addWidget(self.enqueue_button)
         link_row.addWidget(self.bulk_button)
+        link_row.addWidget(self.source_button)
         layout.addLayout(link_row)
 
         self.options_scroll = OptionsScrollArea(self._build_options(), central)
@@ -111,6 +129,18 @@ class MainWindow(QMainWindow):
         for button in (self.pause_button, self.clear_button, self.task_actions_button):
             actions.addWidget(button)
         actions.addStretch()
+        self.completion_combo = QComboBox(self)
+        self.completion_combo.setAccessibleName('When queue finishes')
+        for value, label in ACTION_LABELS.items():
+            self.completion_combo.addItem(label, value)
+        self.completion_combo.setToolTip('Runs only after all new tasks succeed. Power actions have a 30-second cancel countdown. Resets each session.')
+        actions.addWidget(QLabel('When queue finishes', self))
+        actions.addWidget(self.completion_combo)
+        self.finish_actions = CompletionActions(manager, self._perform_completion_action, self)
+        self.finish_actions.reset_requested.connect(self._reset_completion_combo)
+        self.finish_actions.message.connect(self._show_message)
+        self.finish_actions.notice.connect(self._show_notice)
+        self.completion_combo.currentIndexChanged.connect(lambda _: self.finish_actions.arm(self.completion_combo.currentData()))
         layout.addLayout(actions)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -178,6 +208,7 @@ class MainWindow(QMainWindow):
         self.fragment_downloads_spin.valueChanged.connect(self._apply_processing_limits)
         self.network_connections_spin.valueChanged.connect(self._apply_processing_limits)
         self.output_controls.changed.connect(self._schedule_preferences)
+        self.output_controls.profiles.profiles_changed.connect(self._persist_profiles)
         self.workers_spin.valueChanged.connect(self._schedule_preferences)
         self.video_workers_spin.valueChanged.connect(self._schedule_preferences)
         self.ffmpeg_threads_spin.valueChanged.connect(self._schedule_preferences)
@@ -189,9 +220,20 @@ class MainWindow(QMainWindow):
         self.thumbnails.image_ready.connect(self._preview_image_ready)
         self.thumbnails.state_changed.connect(self.preview_panel.set_state)
         self.controller.encoders_changed.connect(self.output_controls.set_encoders, Qt.ConnectionType.QueuedConnection)
+        settings_file = self.preferences.store.path
+        queue_path = settings_file.with_name('yd_queue.json' if settings_file.name == 'yd_settings.json'
+                                             else settings_file.stem + '.queue.json')
+        self.queue_persistence = QueuePersistence(manager, queue_path, self)
+        self.queue_persistence.message.connect(self._show_message)
+        self.queue_persistence.closed.connect(self._finish_close, Qt.ConnectionType.QueuedConnection)
+        restored = self.queue_persistence.load()
         self.controller.start(self.workers_spin.value())
+        if restored:
+            self._show_notice('Saved queue restored. Press Resume to restart unfinished downloads.'
+                              if manager.paused else 'Saved queue restored.', 0)
         QTimer.singleShot(0, self.controller.load_encoders)
         self.updater = UpdateController(self, self.help_menu)
+        self.tool_updater = ToolUpdateController(self, self.help_menu)
         register(self, self._retranslate)
 
     def _change_language(self, code):
@@ -200,6 +242,43 @@ class MainWindow(QMainWindow):
         self.language = code
         set_language(code)
         self.preferences.schedule({'language': code})
+
+    def _reset_completion_combo(self):
+        blocker = QSignalBlocker(self.completion_combo)
+        self.completion_combo.setCurrentIndex(0)
+        del blocker
+
+    def _perform_completion_action(self, action, paths):
+        if action == 'folder':
+            for folder in sorted({path if os.path.isdir(path) else os.path.dirname(path) for path in paths}):
+                if os.path.isdir(folder):
+                    open_folder(folder)
+        elif action == 'close':
+            self.close()
+        else:
+            if not self.preferences.flush():
+                return
+            manager = self.controller.manager
+            revision = manager.queue_revision
+            def perform():
+                from power_actions import run_power_action
+                try:
+                    run_power_action(action)
+                except (OSError, ValueError, RuntimeError) as error:
+                    log_warning('After-download power action failed', error)
+                    try:
+                        self.finish_actions.message.emit('warning', 'After-download action',
+                            'The after-download action could not be completed.', str(error))
+                    except RuntimeError:
+                        pass  # The application may have closed while Windows was suspended.
+            def saved(success):
+                if not success or self._closing:
+                    return
+                if manager.queue_revision != revision or manager.paused or manager.has_update_work():
+                    self._show_notice('After-download action cancelled.')
+                    return
+                threading.Thread(target=perform, name='after-download-power', daemon=True).start()
+            self.queue_persistence.flush(on_finished=saved)
 
     def _retranslate(self):
         self._pause_changed(self.controller.manager.paused)
@@ -282,11 +361,21 @@ class MainWindow(QMainWindow):
         self.folder_edit.setText(self.folder)
         self.folder_edit.setToolTip(self.folder)
         self.output_controls.restore(data)
+        self.output_controls.profiles.restore(data.get('saved_profiles', []))
+
+    def _persist_profiles(self):
+        self.preferences.schedule({'saved_profiles': self.output_controls.profiles.profiles()})
+        if not self.preferences.flush() or not self.preferences.store.writable:
+            self.output_controls.profiles.persistence_failed()
 
     def _schedule_preferences(self):
         values = self.output_controls.values()
         try:
             validate_output_options(values)
+            validate_cookie_options(values)
+            validate_subtitle_options(values)
+            validate_network_options(values)
+            validate_naming_options(values)
         except ValueError:
             return
         self.preferences.schedule(dict(values, language=self.language, last_folder=self.folder, workers=self.workers_spin.value(),
@@ -354,7 +443,69 @@ class MainWindow(QMainWindow):
         if self.bulk_dialog is None:
             self.bulk_dialog = BulkAddDialog(self)
             self.bulk_dialog.links_submitted.connect(self._submit_bulk_links)
+            self.bulk_dialog.playlist_requested.connect(self.open_playlist_selection)
         self.bulk_dialog.open()
+
+    def open_playlist_selection(self, url):
+        if self._closing:
+            return
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+                raise ValueError('Enter one playlist URL to choose which videos to download.')
+            if not self.folder or not os.path.isdir(self.folder):
+                raise ValueError('Choose an existing download folder first.')
+            options = TaskOptions(folder=self.folder, **self.output_controls.values(),
+                **self.output_controls.trim_values())
+            validate_cookie_options(self.output_controls.values(), check_file=True)
+        except ValueError as error:
+            self._show_message('warning', 'Choose playlist videos', str(error), '')
+            return
+        if self.playlist_dialog is not None:
+            self.playlist_dialog.reject()
+            self.playlist_dialog.deleteLater()
+        parent = self.bulk_dialog if self.bulk_dialog is not None and self.bulk_dialog.isVisible() else self
+        self.playlist_dialog = PlaylistSelectionDialog(self.controller.manager, url, options, parent)
+        self.playlist_dialog.queued.connect(self._playlist_queued)
+        self.playlist_dialog.open()
+        self.playlist_dialog.load()
+
+    def _playlist_queued(self, url, added, skipped):
+        if self.bulk_dialog is not None and self.bulk_dialog.links() == [url]:
+            self.bulk_dialog.links_edit.clear()
+            self.bulk_dialog.accept()
+        self.controller.poll()
+        self._show_notice(tr('{added} selected videos queued; {skipped} already queued or repeated.', added=added, skipped=skipped))
+
+    def open_source_formats(self):
+        if self._closing:
+            return
+        url = self.url_edit.text().strip()
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+                raise ValueError('Enter a single video URL to inspect its formats.')
+            if not self.folder or not os.path.isdir(self.folder):
+                raise ValueError('Choose an existing download folder first.')
+            options = TaskOptions(folder=self.folder, **self.output_controls.values(),
+                **self.output_controls.trim_values())
+            validate_cookie_options(self.output_controls.values(), check_file=True)
+        except ValueError as error:
+            self._show_message('warning', 'Source formats', str(error), '')
+            return
+        if self.source_dialog is not None:
+            self.source_dialog.reject()
+            self.source_dialog.deleteLater()
+        self.source_dialog = SourceFormatsDialog(self.controller.manager, url, options, self)
+        self.source_dialog.queued.connect(self._source_queued)
+        self.source_dialog.open()
+        self.source_dialog.load()
+
+    def _source_queued(self, url):
+        if self.url_edit.text().strip() == url:
+            self.url_edit.clear()
+        self.controller.poll()
+        self._show_notice('Selected source formats added to the queue.')
 
     def _submit_links(self, links, *, expand_playlist):
         if self._closing:
@@ -371,10 +522,30 @@ class MainWindow(QMainWindow):
             self._validation_warning("Invalid output profile", str(error))
             return False
         try:
+            validate_cookie_options(self.output_controls.values(), check_file=True)
+        except ValueError as error:
+            self._validation_warning('Cookie settings', str(error))
+            return False
+        try:
+            validate_subtitle_options(self.output_controls.values())
+        except ValueError as error:
+            self._validation_warning('Subtitle settings', str(error))
+            return False
+        try:
+            validate_network_options(self.output_controls.values())
+        except ValueError as error:
+            self._validation_warning('Network settings', str(error))
+            return False
+        try:
+            validate_naming_options(self.output_controls.values())
+        except ValueError as error:
+            self._validation_warning('File and folder naming', str(error))
+            return False
+        try:
             return self.controller.submit_links(
                 links, expand_playlist=expand_playlist, folder=self.folder,
                 **self.output_controls.values(),
-                trim_start=self.trim_start_edit.text().strip(), trim_end=self.trim_end_edit.text().strip())
+                **self.output_controls.trim_values())
         except ValueError as error:
             self._validation_warning(
                 "Invalid trim range",
@@ -383,7 +554,7 @@ class MainWindow(QMainWindow):
             return False
 
     def _validation_warning(self, title, text, details=''):
-        if title in ('Invalid trim range', 'Invalid output profile'):
+        if title in ('Invalid trim range', 'Invalid output profile', 'Cookie settings', 'Subtitle settings', 'Network settings', 'File and folder naming'):
             self.output_controls.advanced_toggle.setChecked(True)
         log_warning(title, text, [('details', details)],
                     once_key=('input_validation', title, text, details),
@@ -562,7 +733,7 @@ class MainWindow(QMainWindow):
                 self._show_notice(f'Diagnostic report saved: {path}')
 
     def _show_message(self, kind, title, text, details):
-        if self._closing:
+        if self._closing and title != 'Queue warning':
             return
         if self._message_boxes and not (self._preferences_closed and title == "Preferences warning"):
             self._pending_messages.append((kind, title, text, details))
@@ -642,8 +813,15 @@ class MainWindow(QMainWindow):
                 warning.finished.connect(lambda result: self.close())
                 return
         self._closing = True
+        self.finish_actions.close()
+        if self.playlist_dialog is not None:
+            self.playlist_dialog.reject()
+        if self.source_dialog is not None:
+            self.source_dialog.reject()
+        self.queue_persistence.timer.stop()
         self._pending_messages.clear()
         self.updater.close(installing=self._update_on_close)
+        self.tool_updater.close()
         self.thumbnails.close()
         self.centralWidget().setEnabled(False)
         if self.bulk_dialog is not None:
@@ -661,6 +839,21 @@ class MainWindow(QMainWindow):
     def _complete_close(self):
         if self._allow_close:
             return
+        if not self._queue_closed:
+            saved = self.queue_persistence.close()
+            if saved is None:
+                return
+            self._queue_closed = True
+            if not saved:
+                warning = next((box for box in self._message_boxes
+                                if box.property('_message_key') == 'Queue warning'), None)
+                if warning is None:
+                    self._show_message('warning', 'Queue warning',
+                        'Your queue could not be saved. Recent changes may not be restored next time.', '')
+                    warning = next(box for box in self._message_boxes
+                                   if box.property('_message_key') == 'Queue warning')
+                warning.finished.connect(lambda result: self._complete_close())
+                return
         if self._update_on_close:
             try:
                 self.updater.apply_on_exit()

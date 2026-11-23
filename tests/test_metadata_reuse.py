@@ -7,7 +7,6 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
-import yt_dlp
 import download_engine
 from task_manager import PlaylistFetcher, TaskManager, TaskOptions
 from utils import DownloadCancelled, InsufficientDiskSpace
@@ -76,7 +75,7 @@ class MetadataReuseTests(unittest.TestCase):
             'video.mp4', 'audio.webm', folder=str(self.folder))
 
     def test_real_parallel_download_reuses_info_and_preserves_headers(self):
-        with patch.object(yt_dlp.YoutubeDL, 'extract_info', side_effect=AssertionError('redundant extraction')):
+        with patch.object(download_engine.YtDlpProcess, 'extract_info', side_effect=AssertionError('redundant extraction')):
             video, audio = self.group(self.info())
         self.assertEqual(Path(video).read_bytes(), b'video' * 100)
         self.assertEqual(Path(audio).read_bytes(), b'audio' * 100)
@@ -84,8 +83,7 @@ class MetadataReuseTests(unittest.TestCase):
 
     def test_expired_parallel_urls_share_one_refresh_and_keep_selected_formats(self):
         self.expired_barrier = threading.Barrier(2)
-        with patch.object(yt_dlp.YoutubeDL, 'extract_info', side_effect=AssertionError('redundant extraction')), \
-                patch.object(yt_dlp.YoutubeDL, 'to_stderr'), \
+        with patch.object(download_engine.YtDlpProcess, 'extract_info', side_effect=AssertionError('redundant extraction')), \
                 patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=self.info()) as refresh:
             video, audio = self.group(self.info(expired=True))
         refresh.assert_called_once()
@@ -116,7 +114,7 @@ class MetadataReuseTests(unittest.TestCase):
 
         with patch.object(download_engine, '_flat_extract', return_value=(info._media_info.info, None)), \
                 patch.object(download_engine, 'fetch_ytinfo_with_retry') as fetch, \
-                patch.object(yt_dlp.YoutubeDL, 'extract_info', side_effect=AssertionError('redundant extraction')), \
+                patch.object(download_engine.YtDlpProcess, 'extract_info', side_effect=AssertionError('redundant extraction')), \
                 patch.object(manager.engine, '_ffmpeg_convert_to_mp3', side_effect=convert):
             PlaylistFetcher(manager, info.url, self.options, False).run()
             manager._process_task(('T1', info.url), 1)
@@ -131,7 +129,7 @@ class MetadataReuseTests(unittest.TestCase):
         def convert(tid, worker_id, source, output):
             Path(output).write_bytes(Path(source).read_bytes())
 
-        with patch.object(yt_dlp.YoutubeDL, 'extract_info', side_effect=AssertionError('redundant extraction')), \
+        with patch.object(download_engine.YtDlpProcess, 'extract_info', side_effect=AssertionError('redundant extraction')), \
                 patch.object(self.engine, '_ffmpeg_convert_to_mp3', side_effect=convert):
             self.engine._complete_via_selector(
                 self.tid, 1, 'url', 'Example', 'Example', 'MP3', None, False, '', '',

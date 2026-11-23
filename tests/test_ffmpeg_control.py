@@ -204,7 +204,9 @@ class FFmpegControlTests(unittest.TestCase):
         code = self.app._run_ffmpeg('T1', 1, [FFMPEG, '-invalid-test-option'], check=False)
         self.assertNotEqual(code, 0)
 
-    def test_ytdlp_merger_uses_managed_runner(self):
+    def test_ytdlp_merger_runs_in_registered_process_tree(self):
+        from functools import partial
+        from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
         video = self.folder / 'video.mp4'
         audio = self.make_audio('audio.wav')
         output = self.folder / 'merged.mkv'
@@ -212,24 +214,33 @@ class FFmpegControlTests(unittest.TestCase):
                         'color=c=black:s=32x32:d=1', '-an', '-c:v', 'libx264', str(video)],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                        **downloader.NO_WINDOW)
-        runner = Mock(side_effect=lambda cmd: self.app._run_ffmpeg('T1', 1, cmd, check=False))
-        with downloader.ManagedYoutubeDL({'quiet': True, 'keepvideo': True,
-                                           'ffmpeg_location': FFMPEG}, runner) as ydl:
-            pp = downloader.yt_dlp.postprocessor.ffmpeg.FFmpegMergerPP(ydl)
-            info = {'filepath': str(output), 'ext': 'mkv',
-                    '__files_to_merge': [str(video), str(audio)],
-                    'requested_formats': [
-                        {'vcodec': 'h264', 'acodec': 'none', 'protocol': 'http'},
-                        {'vcodec': 'none', 'acodec': 'pcm_s16le', 'protocol': 'http'}]}
-            ydl.run_pp(pp, info)
+        class QuietHandler(SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), partial(QuietHandler, directory=str(self.folder)))
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=.02), daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}'
+        info = {'id': 'merge', 'title': 'Merge', 'duration': 1,
+                'formats': [
+                    {'format_id': 'video', 'url': base + '/video.mp4', 'ext': 'mp4',
+                     'vcodec': 'h264', 'acodec': 'none', 'height': 32},
+                    {'format_id': 'audio', 'url': base + '/audio.wav', 'ext': 'wav',
+                     'vcodec': 'none', 'acodec': 'pcm_s16le'}]}
+        try:
+            with patch.object(self.app.engine, '_register_process', wraps=self.app.engine._register_process) as register:
+                with self.app.engine.ytdlp_process({'format': 'bv+ba', 'merge_output_format': 'mkv',
+                        'outtmpl': str(output)}, 'T1', folder=str(self.folder)) as ydl:
+                    result = ydl.process_ie_result(info)
+            self.assertEqual(result['filepath'], str(output))
             self.assertGreater(output.stat().st_size, 0)
-            runner.assert_called_once()
-            self.assertNotIn('real_run_ffmpeg', pp.__dict__)
-            runner.side_effect = downloader.DownloadCancelled()
-            with self.assertRaises(downloader.DownloadCancelled):
-                ydl.run_pp(pp, info)
-            self.assertNotIn('real_run_ffmpeg', pp.__dict__)
-        self.assertEqual(self.app.current_process_pids, {})
+            register.assert_called_once()
+            self.assertEqual(self.app.engine.managed_processes, set())
+            self.assertEqual(self.app.current_process_pids, {})
+        finally:
+            server.shutdown()
+            thread.join(2)
+            server.server_close()
 
 
 if __name__ == '__main__':

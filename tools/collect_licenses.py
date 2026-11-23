@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from app_info import APP_NAME, APP_VERSION, UPDATE_REPOSITORY
 from tools.install_deno import VERSION as DENO_VERSION
+from ytdlp_process import require_executable, executable_version
 from utils import which_executable
 
 
@@ -153,6 +154,38 @@ def collect_deno(output, *, fetch=False):
             'license_sha256': digest(license_path) if license_path.is_file() else None}
 
 
+def collect_ytdlp(output, *, fetch=False):
+    executable = require_executable()
+    version = executable_version(executable)
+    if not re.fullmatch(r'[0-9]{4}\.[0-9]{2}\.[0-9]{2}', version):
+        raise ValueError('Collect yt-dlp notices from an official dated release.')
+    folder = output / 'yt-dlp'
+    folder.mkdir(parents=True, exist_ok=True)
+    inventory_path = folder / 'binary-inventory.json'
+    previous = json.loads(inventory_path.read_text(encoding='utf-8')) if inventory_path.is_file() else {}
+    binary_hash = digest(executable)
+    notices = []
+    for name in ('LICENSE', 'THIRD_PARTY_LICENSES.txt'):
+        path = folder / name
+        url = f'https://raw.githubusercontent.com/yt-dlp/yt-dlp/{version}/{name}'
+        if fetch:
+            with urlopen(url, timeout=30) as response:
+                content = response.read(2 * 1024 ** 2 + 1)
+            if len(content) > 2 * 1024 ** 2 or 'license' not in content.decode('utf-8').lower():
+                raise ValueError('Unexpected upstream yt-dlp notice response.')
+            path.write_bytes(content)
+        if path.is_file():
+            notices.append({'file': path.relative_to(output).as_posix(), 'sha256': digest(path), 'url': url})
+    matching_source = (fetch or previous.get('version') == version and previous.get('sha256') == binary_hash
+                       and previous.get('notices') == notices and previous.get('license_collected'))
+    record = {'name': 'yt-dlp', 'version': version, 'sha256': binary_hash,
+              'notices': notices, 'license_collected': len(notices) == 2 and bool(matching_source),
+              'scope': 'Official standalone executable and its bundled dependencies; '
+                       'upstream notices do not replace the executable dependency review.'}
+    inventory_path.write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
+    return record
+
+
 def collect(output, *, fetch=False):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -165,22 +198,25 @@ def collect(output, *, fetch=False):
     copy_notice(python_license, output / 'python-runtime/LICENSE.txt')
     external = collect_ffmpeg(output)
     deno = collect_deno(output, fetch=fetch)
+    ytdlp = collect_ytdlp(output, fetch=fetch)
     findings = [
         'Publish the exact application source and build instructions for this binary release.',
         'Provide corresponding source/build materials for the shipped GPL/LGPL components. Upstream homepages alone do not establish compliance.',
         'Review FFmpeg static-library licenses, copyright notices, exact versions, sources, patches and build scripts. The top-level FFmpeg GPL text is not a complete audit of its external libraries.',
         'Review only the Qt modules/plugins actually bundled, including their third-party notices and corresponding-source obligations. Qt commercial notices copied from wheels do not select a commercial license.',
-        'Review third-party components embedded in the Deno and curl-cffi native binaries; package-level MIT notices alone may not cover every bundled component.',
+        'Review third-party components embedded in Deno and the standalone yt-dlp executable, including its Python, EJS and curl-cffi dependencies.',
         'Compare this installed dependency inventory with the final PyInstaller bundle. Optional modules/plugins included by packaging may require additional notices.',
     ]
     findings.extend(f'No installed notice text was found for {package["name"]}.'
                     for package in packages if not package['notices'])
     if not deno['license_collected']:
         findings.append('Fetch the pinned Deno MIT license using --fetch-upstream, or provide the verified upstream text.')
+    if not ytdlp['license_collected']:
+        findings.append('Fetch the exact yt-dlp release license and third-party notices using --fetch-upstream.')
     manifest = {'application': APP_NAME, 'version': APP_VERSION, 'python': sys.version.split()[0],
                 'repository': UPDATE_REPOSITORY, 'status': 'REVIEW_REQUIRED',
                 'scope': 'Installed runtime dependency inventory, not a final bundle or legal clearance.',
-                'python_packages': packages, 'external_tools': external + [deno], 'review_required': findings}
+                'python_packages': packages, 'external_tools': external + [deno, ytdlp], 'review_required': findings}
     (output / 'inventory.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     rows = [f'# {APP_NAME} {APP_VERSION} — Third-party notices', '',
             'This is a collected license inventory, not a completed distribution compliance review.', '',
@@ -192,6 +228,9 @@ def collect(output, *, fetch=False):
                  'FFmpeg/FFprobe configuration and notices: `ffmpeg/` and `ffprobe/`.',
                  'Deno MIT notice: `deno/LICENSE.md` when collected.', '', '## Review before publication', ''])
     rows.extend(f'- {finding}' for finding in findings)
+    rows.extend(['', '## Acknowledgements', '',
+                 '[ytdlp-interface](https://github.com/ErrorFlynn/ytdlp-interface) by ErrorFlynn',
+                 'was consulted for feature comparison and inspiration.'])
     (output / 'THIRD_PARTY_NOTICES.md').write_text('\n'.join(rows) + '\n', encoding='utf-8')
     return manifest
 
@@ -199,7 +238,7 @@ def collect(output, *, fetch=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=ROOT / 'build/release-notices')
-    parser.add_argument('--fetch-upstream', action='store_true', help='Download the pinned official Deno license.')
+    parser.add_argument('--fetch-upstream', action='store_true', help='Download exact upstream Deno and yt-dlp notices.')
     args = parser.parse_args()
     manifest = collect(args.output, fetch=args.fetch_upstream)
     print(f'Collected {len(manifest["python_packages"])} package inventories in {args.output}')

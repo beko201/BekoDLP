@@ -127,7 +127,7 @@ class DownloadPauseTests(unittest.TestCase):
                 self.manager.paused = True
                 self.manager.update_task(self.tid, status='Queued')
                 stop_event = threading.Event()
-                with patch.object(download_engine, 'ManagedYoutubeDL') as ydl:
+                with patch.object(download_engine, 'YtDlpProcess') as ydl:
                     thread, results = self.run_async(lambda: self.engine._download_format(
                         self.tid, 'video', self.info.url, self.info.video_only_formats()[0],
                         'video.mp4', folder=str(self.folder), stop_event=stop_event))

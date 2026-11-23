@@ -1,5 +1,6 @@
 """Read-only task snapshots with numeric sort values for the Qt table."""
 from dataclasses import dataclass
+from collections.abc import Mapping
 import math
 import re
 
@@ -14,16 +15,44 @@ from ui.i18n import duration_text, register, tr
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 PROGRESS_ROLE = Qt.ItemDataRole.UserRole + 2
 
-TABLE_TASK_FIELDS = frozenset((
+TABLE_TASK_FIELDS = (
     'id', 'url', 'title', 'format', 'quality', 'status', 'progress', 'warnings',
     'output_path', 'output_mode', 'container', 'video_codec', 'audio_codec',
     'audio_bit_depth', '_progress_stage', 'speed_bps', 'eta_seconds',
-))
+)
+_FIELD_POSITIONS = {key: index for index, key in enumerate(TABLE_TASK_FIELDS)}
+_MISSING = object()
+
+
+class _TaskSnapshot(Mapping):
+    """Fixed field order avoids a separate hash table for every displayed row."""
+    __slots__ = ('_values',)
+
+    def __init__(self, task):
+        self._values = tuple(tuple(task.get('warnings', ())) if key == 'warnings'
+                             else task.get(key, _MISSING) for key in TABLE_TASK_FIELDS)
+
+    def __getitem__(self, key):
+        value = self._values[_FIELD_POSITIONS[key]]
+        if value is _MISSING:
+            raise KeyError(key)
+        return value
+
+    def get(self, key, default=None):
+        position = _FIELD_POSITIONS.get(key)
+        value = self._values[position] if position is not None else _MISSING
+        return default if value is _MISSING else value
+
+    def __iter__(self):
+        return (key for key, value in zip(TABLE_TASK_FIELDS, self._values) if value is not _MISSING)
+
+    def __len__(self):
+        return sum(value is not _MISSING for value in self._values)
 
 
 @dataclass(slots=True)
 class TaskRow:
-    snapshot: dict
+    snapshot: Mapping
     display: tuple
     sort: tuple
     progress: float
@@ -31,8 +60,7 @@ class TaskRow:
 
 def _make_row(tid, task):
     # The manager owns full options, diagnostics and internal processing state.
-    snapshot = {key: task[key] for key in TABLE_TASK_FIELDS if key in task}
-    snapshot["warnings"] = list(task.get("warnings", []))
+    snapshot = _TaskSnapshot(task)
     title = task.get("title", "")
     if title == "(resolving title...)":
         title = tr("Resolving title…")

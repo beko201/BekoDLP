@@ -9,7 +9,6 @@ import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
-import yt_dlp
 
 import download_engine
 from network_limits import NetworkLimits
@@ -128,20 +127,20 @@ class NetworkLimitTests(unittest.TestCase):
         self.assertIn("fragment_downloads", issues)
         self.assertIn("network_connections", issues)
 
-    def test_queued_fragment_requests_are_cancelled_before_opening_http(self):
+    def test_cancelled_requests_do_not_launch_a_downloader_process(self):
         cancel = threading.Event()
         def check():
             if cancel.is_set():
                 raise DownloadCancelled()
-        with download_engine.ManagedYoutubeDL({'quiet': True}, Mock(), request_check=check) as ydl, \
-                patch.object(yt_dlp.YoutubeDL, 'urlopen') as network:
+        with download_engine.YtDlpProcess({'quiet': True}, check=check) as ydl, \
+                patch('ytdlp_process.subprocess.Popen') as process:
             cancel.set()
             with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = [pool.submit(ydl.urlopen, 'http://example.com/fragment') for _ in range(40)]
+                futures = [pool.submit(ydl.extract_info, 'http://example.com/fragment') for _ in range(40)]
                 for future in futures:
                     with self.assertRaises(DownloadCancelled):
                         future.result(timeout=2)
-            network.assert_not_called()
+            process.assert_not_called()
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")

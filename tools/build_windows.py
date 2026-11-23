@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app_info import APP_NAME, APP_VERSION, APP_EXECUTABLE
-from package_layout import MANIFEST_NAME, MANAGED_ENTRIES, create_manifest, parse_manifest
+from package_layout import MANIFEST_NAME, MANAGED_ENTRIES, create_manifest, parse_manifest, file_sha256
 from utils import which_executable
 from tools.prepare_release_notices import consolidate
 
@@ -34,11 +34,15 @@ def build():
     manifest = json.loads((notices / 'inventory.json').read_text(encoding='utf-8'))
     if (manifest['application'], manifest['version']) != (APP_NAME, APP_VERSION):
         raise SystemExit('Recollect release notices for this application version.')
+    ytdlp = ROOT / 'tools/runtime/yt-dlp.exe'
+    record = next((tool for tool in manifest.get('external_tools', []) if tool.get('name') == 'yt-dlp'), None)
+    if not ytdlp.is_file() or not record or record.get('sha256') != file_sha256(ytdlp) or not record.get('license_collected'):
+        raise SystemExit('Install yt-dlp and recollect its exact binary notices with --fetch-upstream before building.')
     ffmpeg, ffprobe = which_executable(['ffmpeg']), which_executable(['ffprobe'])
     if not ffmpeg or not ffprobe:
         raise SystemExit('Install FFmpeg/FFprobe before building.')
     catalog = Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)) / 'qtbase_tr.qm'
-    inputs = [catalog, ROOT / 'tools/runtime/deno.exe', ROOT / 'tools/apply_update.ps1',
+    inputs = [catalog, ROOT / 'tools/runtime/yt-dlp.exe', ROOT / 'tools/runtime/deno.exe', ROOT / 'tools/apply_update.ps1',
               notices / 'THIRD_PARTY_NOTICES.md', ROOT / 'LICENSE']
     for path in inputs:
         if not path.is_file():
@@ -61,14 +65,11 @@ def build():
             '--specpath', str(work), '--workpath', str(work / 'work'), '--distpath', str(staging),
             '--runtime-hook', str(ROOT / 'tools/pyinstaller_runtime.py'),
             '--additional-hooks-dir', str(ROOT / 'tools/build_hooks'),
-            '--exclude-module', 'yt_dlp.__pyinstaller',
+            '--exclude-module', 'yt_dlp', '--exclude-module', 'yt_dlp_ejs',
+            '--exclude-module', 'curl_cffi',
             '--add-data', f'{ROOT / "assets/app.svg"}:assets',
             '--add-data', f'{catalog}:PySide6/translations']
-    for module in ('yt_dlp', 'yt_dlp_ejs', 'curl_cffi'):
-        args.extend(['--collect-all', module])
-    for package in ('yt-dlp', 'curl-cffi'):
-        args.extend(['--recursive-copy-metadata', package])
-    for package in ('yt-dlp-ejs', 'PySide6', 'psutil', 'Unidecode'):
+    for package in ('PySide6', 'psutil', 'Unidecode'):
         args.extend(['--copy-metadata', package])
     args.append(str(ROOT / 'main.py'))
     env = dict(os.environ, PYINSTALLER_CONFIG_DIR=str(ROOT / 'build/pyinstaller-cache'))
@@ -79,6 +80,7 @@ def build():
     tools.mkdir(exist_ok=True)
     for source, name in ((ffmpeg, 'ffmpeg.exe'), (ffprobe, 'ffprobe.exe'),
                          (ROOT / 'tools/runtime/deno.exe', 'deno.exe'),
+                         (ROOT / 'tools/runtime/yt-dlp.exe', 'yt-dlp.exe'),
                          (ROOT / 'tools/apply_update.ps1', 'apply_update.ps1')):
         shutil.copy2(source, tools / name)
     consolidate(notices, collected / 'licenses')

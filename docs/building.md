@@ -43,21 +43,24 @@ The three requirements files serve different purposes:
 
 | File | Contents |
 | --- | --- |
-| `requirements.txt` | Direct application dependencies, such as PySide6 and yt-dlp |
+| `requirements.txt` | Direct application dependencies: PySide6, psutil and Unidecode |
 | `requirements-windows.lock.txt` | Direct dependencies plus their pinned Windows dependencies |
 | `requirements-build.txt` | The Windows lock file plus PyInstaller and packaging tools |
 
 Installing `requirements-build.txt` includes the other required packages; you do
-not need to install all three files separately. When upgrading yt-dlp, keep its
-EJS dependency and `SUPPORTED_YTDLP_VERSION` in `download_engine.py` compatible.
+not need to install all three files separately. The application does not import
+the yt-dlp Python package. It communicates with
+the standalone executable through JSON and progress templates in `ytdlp_process.py`.
 
 ## 3. Install the bundled media tools
 
-FFmpeg merges, converts and trims media. FFprobe inspects the resulting files.
+The standalone yt-dlp executable downloads media. FFmpeg merges, converts and
+trims media. FFprobe inspects the resulting files.
 Deno runs the JavaScript used by yt-dlp's YouTube extraction support. These are
 external executables, so they are installed by the project helpers rather than pip:
 
 ```powershell
+.\.venv\Scripts\python.exe tools/install_ytdlp.py
 .\.venv\Scripts\python.exe tools/install_deno.py
 .\.venv\Scripts\python.exe tools/install_ffmpeg.py
 ```
@@ -67,12 +70,13 @@ values and place the tools inside the project. They leave the system PATH
 unchanged. Verify the installed executables directly:
 
 ```powershell
+.\tools\runtime\yt-dlp.exe --version
 .\tools\runtime\deno.exe --version
 .\tools\runtime\ffmpeg\bin\ffmpeg.exe -version
 .\tools\runtime\ffmpeg\bin\ffprobe.exe -version
 ```
 
-All three commands must run successfully. The application prefers these portable
+All four commands must run successfully. The application prefers these portable
 tools over system installations. Keep them installed while building: the builder
 copies them into the release so end users do not need to install them.
 
@@ -102,7 +106,7 @@ Resolve failures before creating the release package.
 ## 5. Set the version and collect license notices
 
 In `app_info.py`, set `APP_VERSION` to the version you are building. For example,
-`APP_VERSION = '1.0'` corresponds to the GitHub release tag `v1.0`.
+`APP_VERSION = '1.1'` corresponds to the GitHub release tag `v1.1`.
 `UPDATE_REPOSITORY` identifies the public GitHub repository used by the updater;
 the configured repository is `beko201/BekoDLP`.
 
@@ -134,18 +138,18 @@ resources with PyInstaller, copies the media tools and notices, writes a file
 manifest, and creates the release ZIP. Wait for successful completion; the final
 console output shows the EXE path, ZIP path and license-review status.
 
-For version `1.0`, the outputs are:
+For version `1.1`, the outputs are:
 
 ```text
 dist/
   BekoDLP/
     BekoDLP.exe
     _internal/             Python, Qt, application assets and translations
-    tools/                 ffmpeg.exe, ffprobe.exe, deno.exe, apply_update.ps1
+    tools/                 yt-dlp.exe, ffmpeg.exe, ffprobe.exe, deno.exe, apply_update.ps1
     licenses/              Consolidated third-party notices and index
     LICENSE
     package-manifest.json
-  BekoDLP-1.0-Windows-x64.zip
+  BekoDLP-1.1-Windows-x64.zip
 ```
 
 Run `dist/BekoDLP/BekoDLP.exe` to try the built application. Keep the entire
@@ -156,7 +160,8 @@ directory. This folder build avoids extracting the runtime on every startup.
 
 `package-manifest.json` records the managed files, their sizes and SHA-256 hashes
 for update verification. The ZIP includes only those files and the manifest.
-Preferences (`yd_settings.json` and backups), logs (`debug.log`, `errors.log` and
+Preferences (`yd_settings.json` and backups), the saved queue (`yd_queue.json` and
+backups/recovery copies), logs (`debug.log`, `errors.log` and
 rotated files) and downloads are excluded from the release archive. In the
 portable application, preferences and logs remain beside the EXE.
 
@@ -181,7 +186,7 @@ interactive Windows desktop session, run:
 
 The first helper opens isolated copies of the actual EXE and checks English video
 download, Turkish trimmed MP3 conversion and clean shutdown. It starts the app
-from another working directory and removes system Python, FFmpeg and Deno from
+from another working directory and removes system Python, yt-dlp, FFmpeg and Deno from
 the test process's PATH, exercising the bundled tools.
 
 The second helper reinstalls the actual ZIP into an isolated application copy.
@@ -192,15 +197,15 @@ does not verify a public GitHub update between different versions.
 The helpers use Windows UI Automation and need access to their test windows.
 Their settings, media and reports are stored under `build/packaged-media-check/`
 and `build/packaged-update-check/`. Also test the extracted ZIP on a separate
-Windows x64 machine without Python, FFmpeg or Deno installed.
+Windows x64 machine without Python, yt-dlp, FFmpeg or Deno installed.
 
 ## 8. Prepare the GitHub release
 
 Once the package checks and required license/source work are complete:
 
-1. Tag the exact application source with the matching version, such as `v1.0`.
+1. Tag the exact application source with the matching version, such as `v1.1`.
 2. Create a release in the repository configured by `UPDATE_REPOSITORY`.
-3. Attach the complete `BekoDLP-1.0-Windows-x64.zip`, using the appropriate version
+3. Attach the complete `BekoDLP-1.1-Windows-x64.zip`, using the appropriate version
    in its name. This is the download intended for Windows users.
 4. Provide the matching application source and applicable third-party source
    materials, with clear download links. Follow the [license review](license-review.md)
@@ -248,3 +253,17 @@ the old build until the new one works. Subsequent folder releases use ZIP update
 | `Missing build input` | Check the path named in the error. Install portable tools, collect notices or reinstall the pinned Qt packages as appropriate. |
 | The builder says the application is running | Close the EXE launched from `dist/BekoDLP/`, then retry the build. |
 | The moved EXE cannot start | Move or extract the whole `BekoDLP/` folder, including `_internal/` and `tools/`. Check available application logs for startup details. |
+
+### Updating the download engine
+
+`tools/install_ytdlp.py` downloads an official Windows x64 executable and verifies
+its pinned SHA-256 before replacing the local development copy. Its release and
+checksum are build inputs, not an exact-version runtime restriction. Before
+changing that pin, run the regression suite against the candidate executable,
+including cached metadata, playlist batches, HLS, pause/cancel and selector merges.
+Recollect notices for the exact executable before building a new package.
+
+The GUI does not import `yt_dlp`, `yt_dlp_ejs` or `curl_cffi`. Those components can
+still be bundled inside upstream's standalone executable and keep their licenses.
+The existing application updater continues to replace the complete managed package;
+this change does not add a separate in-app download-engine updater.

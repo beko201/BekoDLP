@@ -20,7 +20,7 @@ class PortablePathTests(unittest.TestCase):
             elsewhere = root / 'elsewhere'
             for folder in (install / 'tools', install / 'licenses', elsewhere / 'tools'):
                 folder.mkdir(parents=True)
-            for name in ('ffmpeg.exe', 'ffprobe.exe', 'deno.exe'):
+            for name in ('ffmpeg.exe', 'ffprobe.exe', 'deno.exe', 'yt-dlp.exe'):
                 (install / 'tools' / name).write_bytes(b'installed')
                 (elsewhere / 'tools' / name).write_bytes(b'wrong tool')
             with chdir(elsewhere), patch.object(sys, 'frozen', True, create=True), \
@@ -28,7 +28,7 @@ class PortablePathTests(unittest.TestCase):
                 self.assertEqual(app_paths.install_root(), install.resolve())
                 self.assertEqual(app_paths.licenses_root(), (install / 'licenses').resolve())
                 self.assertEqual(Path(portable_deno_path()), (install / 'tools/deno.exe').resolve())
-                for name in ('ffmpeg', 'ffprobe'):
+                for name in ('ffmpeg', 'ffprobe', 'yt-dlp'):
                     self.assertEqual(Path(which_executable([name])), (install / 'tools' / (name + '.exe')).resolve())
 
     def test_source_resource_roots_do_not_depend_on_cwd(self):

@@ -157,7 +157,7 @@ class OutputIsolationTests(unittest.TestCase):
             fake.__enter__ = Mock(return_value=fake)
             fake.__exit__ = Mock(return_value=False)
             fake.extract_info.return_value = {'requested_downloads': [{'filepath': str(original)}]}
-            with patch.object(downloader, 'ManagedYoutubeDL', return_value=fake):
+            with patch.object(downloader, 'YtDlpProcess', return_value=fake):
                 with self.assertRaisesRegex(RuntimeError, 'outside the task workspace'):
                     app._complete_via_selector('T1', 1, 'url', 'Example', 'Example', 'MP4',
                                                1080, False, '', '', folder=temp)

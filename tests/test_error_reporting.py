@@ -10,7 +10,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import utils
-import yt_dlp
+from ytdlp_process import YtDlpProcessError
 from task_manager import TaskManager, TaskOptions
 from download_engine import DownloadEngine
 from errors import MediaOperationError
@@ -177,9 +177,9 @@ class ErrorReportingTests(unittest.TestCase):
                 self.assertIn(f'{error_type.__name__}: unexpected internal failure', details)
 
     def test_only_explicit_operation_and_ytdlp_errors_omit_tracebacks(self):
-        for error_type in (MediaOperationError, utils.InsufficientDiskSpace, yt_dlp.utils.DownloadError):
+        for error_type in (MediaOperationError, utils.InsufficientDiskSpace, YtDlpProcessError):
             with self.subTest(error_type=error_type):
-                self.assertTrue(issubclass(error_type, RuntimeError) or error_type is yt_dlp.utils.DownloadError)
+                self.assertTrue(issubclass(error_type, RuntimeError) or error_type is YtDlpProcessError)
                 try:
                     raise error_type('expected operation failure')
                 except error_type:
@@ -381,8 +381,7 @@ class ErrorReportingTests(unittest.TestCase):
         with patch.object(utils, 'ERROR_LOG_FILE', str(self.log)), \
                 patch.object(sys, 'stderr', io.StringIO()) as stderr:
             for _ in range(2):
-                with yt_dlp.YoutubeDL({'quiet': True, **utils._network_options(None)}) as ydl:
-                    ydl.report_warning(message)
+                utils._network_options(None)['logger'].warning(message)
             self.assertEqual(stderr.getvalue(), '')
         text = self.text()
         self.assertEqual(text.count('WARNING yt-dlp'), 1)

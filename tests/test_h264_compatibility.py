@@ -224,7 +224,7 @@ class H264CompatibilityTests(unittest.TestCase):
     def test_selector_fallback_also_converts_opus_and_preserves_h264(self):
         source = self.source()
 
-        def ydl(opts, runner, *, request_check=None):
+        def ydl(opts, **kwargs):
             instance = Mock()
             instance.__enter__ = Mock(return_value=instance)
             instance.__exit__ = Mock(return_value=False)
@@ -237,7 +237,7 @@ class H264CompatibilityTests(unittest.TestCase):
             instance.extract_info.side_effect = extract
             return instance
 
-        with patch.object(download_engine, 'ManagedYoutubeDL', side_effect=ydl):
+        with patch.object(download_engine, 'YtDlpProcess', side_effect=ydl):
             self.engine._complete_via_selector(self.tid, 1, 'url', 'Example', 'Example',
                                                'MP4', 1080, True, '', '', folder=str(self.output))
         task = self.manager.get_task(self.tid)

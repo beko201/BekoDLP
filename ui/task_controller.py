@@ -23,6 +23,14 @@ def task_status(task):
         return "Cancelling…"
     if status == "Paused":
         return "Paused"
+    if status == 'Downloading selected section':
+        return status
+    if status in ('Downloading cover artwork', 'Preparing cover artwork', 'Embedding cover artwork', 'Embedding chapter markers'):
+        return status
+    if 'Downloading subtitles' in status:
+        return 'Downloading subtitles'
+    if 'Embedding subtitles' in status:
+        return 'Embedding subtitles'
     if status == "Waiting for video conversion slot":
         return "Waiting for conversion"
     if status == "Waiting for download connection slot":

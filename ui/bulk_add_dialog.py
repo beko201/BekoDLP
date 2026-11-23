@@ -8,6 +8,7 @@ from ui.i18n import register, tr
 
 class BulkAddDialog(QDialog):
     links_submitted = Signal(list)
+    playlist_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -18,6 +19,7 @@ class BulkAddDialog(QDialog):
         label.setWordWrap(True)
         layout.addWidget(label)
         self.links_edit = QPlainTextEdit(self)
+        self.links_edit.setAccessibleName('Video or playlist URLs')
         self.links_edit.setPlaceholderText("https://www.youtube.com/watch?v=…\nhttps://www.youtube.com/playlist?list=…")
         layout.addWidget(self.links_edit)
         self.count_label = QLabel(self)
@@ -26,6 +28,9 @@ class BulkAddDialog(QDialog):
         self.buttons = QDialogButtonBox(self)
         self.submit_button = self.buttons.addButton("Add to queue", QDialogButtonBox.ButtonRole.AcceptRole)
         self.submit_button.setEnabled(False)
+        self.playlist_button = self.buttons.addButton('Choose playlist videos…', QDialogButtonBox.ButtonRole.ActionRole)
+        self.playlist_button.setToolTip('Enter one playlist URL to choose which videos to download.')
+        self.playlist_button.clicked.connect(lambda: self.playlist_requested.emit(self.links()[0]) if len(self.links()) == 1 else None)
         self.buttons.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole)
         self.buttons.accepted.connect(lambda: self.links_submitted.emit(self.links()))
         self.buttons.rejected.connect(self.reject)
@@ -41,3 +46,4 @@ class BulkAddDialog(QDialog):
         count = len(self.links())
         self.count_label.setText(tr('{count} link' if count == 1 else '{count} links', count=count))
         self.submit_button.setEnabled(count > 0)
+        self.playlist_button.setEnabled(count == 1)

@@ -89,6 +89,9 @@ def consolidate(source, destination):
                  f'separately in `{APP_NAME}-{APP_VERSION}-license-evidence.zip` when prepared.',
                  'That archive is partial evidence, not complete FFmpeg corresponding source.',
                  f'Project repository: https://github.com/{inventory.get("repository", "beko201/BekoDLP")}', ''])
+    rows.extend(['## Acknowledgements', '',
+                 '[ytdlp-interface](https://github.com/ErrorFlynn/ytdlp-interface) by ErrorFlynn',
+                 'was consulted for feature comparison and inspiration.', ''])
     (destination / 'THIRD_PARTY_NOTICES.md').write_text('\n'.join(rows), encoding='utf-8')
     return index
 

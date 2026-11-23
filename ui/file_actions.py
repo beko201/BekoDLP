@@ -15,6 +15,8 @@ def open_folder(path):
 
 
 def reveal_file(path):
+    if path and os.path.isdir(path):
+        return open_folder(path)
     if not path or not os.path.isfile(path):
         raise FileNotFoundError("The downloaded file was moved or deleted.")
     path = os.path.abspath(path)

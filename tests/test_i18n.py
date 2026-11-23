@@ -16,6 +16,7 @@ from settings import DEFAULTS, MAX_SETTINGS_BYTES, SettingsStore, validate_setti
 from task_manager import TaskManager, TaskOptions
 from ui.i18n import TR, language, set_language, startup_language, tr
 from ui.main_window import MainWindow
+from qt_support import finish_window_close
 
 
 class LanguageTests(unittest.TestCase):
@@ -34,7 +35,7 @@ class LanguageTests(unittest.TestCase):
         for window in self.windows:
             for box in list(window._message_boxes):
                 box.done(QMessageBox.StandardButton.Ok)
-            window.close()
+            finish_window_close(window)
             window.controller.poll()
         for _ in range(4):
             self.app.processEvents()
@@ -143,8 +144,7 @@ class LanguageTests(unittest.TestCase):
             box = next(iter(window._message_boxes))
             self.assertEqual(box.windowTitle(), 'Tercih uyarısı')
             box.done(QMessageBox.StandardButton.Ok)
-            for _ in range(5):
-                self.app.processEvents()
+            finish_window_close(window)
         self.assertTrue(window._allow_close)
 
     def test_startup_language_read_is_bounded_read_only_and_rejects_bad_documents(self):

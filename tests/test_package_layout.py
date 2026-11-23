@@ -61,6 +61,20 @@ class PackageLayoutTests(unittest.TestCase):
             with self.assertRaises(ValueError): extract_package(archive, root / 'wrong', expected_version='1.2')
             self.assertFalse((root / 'wrong').exists())
 
+    def test_missing_ytdlp_rejected_even_when_removed_from_manifest_and_archive(self):
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(package_payload())) as source, zipfile.ZipFile(output, 'w') as target:
+            for member in source.infolist():
+                if member.filename == 'BekoDLP/tools/yt-dlp.exe':
+                    continue
+                content = source.read(member)
+                if member.filename == 'BekoDLP/' + MANIFEST_NAME:
+                    manifest = json.loads(content)
+                    manifest['files'] = [row for row in manifest['files'] if row['path'] != 'tools/yt-dlp.exe']
+                    content = json.dumps(manifest).encode()
+                target.writestr(member, content)
+        self.reject_zip(output.getvalue())
+
     def test_hash_mismatch_is_rejected_during_extraction(self):
         content = self.rewrite(transform=lambda name, content: b'xxxxxxx' if name.endswith('deno.exe') else content)
         with tempfile.TemporaryDirectory() as folder:

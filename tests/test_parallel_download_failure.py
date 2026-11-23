@@ -62,7 +62,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
                     unrelated = self.folder / 'unrelated.mp4'
                     unrelated.write_bytes(b'preserve')
 
-                    def fake_ydl(options, runner, *, request_check=None):
+                    def fake_ydl(options, **kwargs):
                         def download(urls):
                             path = Path(options['outtmpl'])
                             with Path(str(path) + '.part').open('wb') as stream:
@@ -79,7 +79,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
                                 try:
                                     while True:
                                         if mode == 'retry':
-                                            options['retry_sleep_functions']['http'](1)
+                                            options['cancel_check']()
                                         else:
                                             options['progress_hooks'][0]({'status': 'downloading'})
                                         time.sleep(0.01)
@@ -89,7 +89,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
 
                         return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-                    with patch.object(download_engine, 'ManagedYoutubeDL', side_effect=fake_ydl):
+                    with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl):
                         thread, results = self.run_async(self.group)
                         thread.join(1.5)
                         try:
@@ -109,14 +109,14 @@ class ParallelDownloadFailureTests(unittest.TestCase):
     def test_new_group_succeeds_after_failure_without_cancelling_task(self):
         fail = True
 
-        def fake_ydl(options, runner, *, request_check=None):
+        def fake_ydl(options, **kwargs):
             def download(urls):
                 if fail:
                     raise OSError('first attempt failed')
                 Path(options['outtmpl']).write_bytes(options['format'].encode())
             return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-        with patch.object(download_engine, 'ManagedYoutubeDL', side_effect=fake_ydl):
+        with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl):
             with self.assertRaisesRegex(OSError, 'first attempt failed'):
                 self.group()
             self.assertFalse(self.manager.is_cancelled(self.tid))
@@ -127,12 +127,12 @@ class ParallelDownloadFailureTests(unittest.TestCase):
         self.assertFalse(self.manager.is_cancelled(self.tid))
 
     def test_stream_failure_is_reported_as_error_and_can_be_retried(self):
-        def fake_ydl(options, runner, *, request_check=None):
+        def fake_ydl(options, **kwargs):
             def download(urls):
                 raise OSError('original download error')
             return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-        with patch.object(download_engine, 'ManagedYoutubeDL', side_effect=fake_ydl), \
+        with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl), \
                 patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=self.info), \
                 patch.object(self.manager, '_log_task_error') as log_error:
             self.manager._process_task((self.tid, 'url'), 1)
@@ -146,7 +146,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
     def test_user_cancel_stops_both_streams_and_preserves_cancel_status(self):
         ready = threading.Barrier(3)
 
-        def fake_ydl(options, runner, *, request_check=None):
+        def fake_ydl(options, **kwargs):
             def download(urls):
                 with Path(options['outtmpl'] + '.part').open('wb'):
                     ready.wait(2)
@@ -155,7 +155,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
                         time.sleep(0.01)
             return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-        with patch.object(download_engine, 'ManagedYoutubeDL', side_effect=fake_ydl):
+        with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl):
             thread, results = self.run_async(self.group)
             ready.wait(2)
             self.manager.cancel_task(self.tid)

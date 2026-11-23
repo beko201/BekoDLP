@@ -9,6 +9,14 @@ from settings import (BITRATES, CODECS, DEFAULTS, MAX_WORKERS, MAX_VIDEO_WORKERS
                       MAX_FRAGMENT_DOWNLOADS, MAX_NETWORK_CONNECTIONS, QUALITIES)
 from ui.i18n import register, tr, translate_combo
 from ui.field_help import FieldHelpButton, FieldLabel
+from ui.cookie_controls import CookieControls
+from ui.subtitle_controls import SubtitleControls
+from ui.naming_controls import NamingControls
+from ui.cover_controls import CoverControls
+from ui.chapter_controls import ChapterControls
+from ui.range_controls import RangeControls
+from ui.network_controls import NetworkControls
+from ui.profile_controls import ProfileControls
 
 QUICK_AUDIO_CONTAINERS = {'original': 'auto', 'mp3': 'mp3', 'aac': 'm4a',
                           'opus': 'opus', 'flac': 'flac', 'lpcm': 'wav'}
@@ -96,15 +104,15 @@ class OutputControls(QGroupBox):
             if widget is self.quality_combo:
                 self.selection_label = label
             label.setBuddy(widget)
-            grid.addWidget(self._field_header(text, label, widget), 0, column)
-            grid.addWidget(widget, 1, column)
-        grid.addWidget(self.audio_format_combo, 1, 1)
-        grid.addWidget(self.advanced_toggle, 1, 2, Qt.AlignmentFlag.AlignRight)
+            grid.addWidget(self._field_header(text, label, widget), 1, column)
+            grid.addWidget(widget, 2, column)
+        grid.addWidget(self.audio_format_combo, 2, 1)
+        grid.addWidget(self.advanced_toggle, 2, 2, Qt.AlignmentFlag.AlignRight)
         self.summary_label = QLabel(self)
         self.summary_label.setObjectName('mutedLabel')
         self.summary_label.setWordWrap(True)
-        grid.addWidget(self.summary_label, 2, 0, 1, 3)
-        grid.addWidget(self.advanced_widget, 3, 0, 1, 3)
+        grid.addWidget(self.summary_label, 3, 0, 1, 3)
+        grid.addWidget(self.advanced_widget, 4, 0, 1, 3)
         widgets = (("Container", self.container_combo), ("Video codec", self.codec_combo),
                    ("Audio codec", self.audio_codec_combo), ("Conversion quality", self.video_quality_combo),
                    ("Conversion bitrate", self.bitrate_combo),
@@ -141,6 +149,14 @@ class OutputControls(QGroupBox):
             label.setBuddy(widget)
             advanced_grid.addWidget(self._field_header(text, label, widget), 4, column)
             advanced_grid.addWidget(widget, 5, column)
+        self.trim_download_combo = QComboBox(self)
+        self.trim_download_combo.setAccessibleName('Trim download mode')
+        self.trim_download_combo.addItem('Download selected section only', 'section')
+        self.trim_download_combo.addItem('Download full source and trim', 'full')
+        self.trim_download_combo.setToolTip('Section mode never falls back to a full download. FFmpeg section downloads do not support SOCKS proxies or speed limits.')
+        advanced_grid.addWidget(QLabel('Trim download mode', self), 4, 3, 1, 2)
+        advanced_grid.addWidget(self.trim_download_combo, 5, 3, 1, 2)
+        self.trim_download_combo.currentIndexChanged.connect(self.refresh)
         self.bit_depth_label = FieldLabel('Bit depth', self)
         self.bit_depth_label.setBuddy(self.bit_depth_combo)
         self.bit_depth_header = self._field_header('Bit depth', self.bit_depth_label, self.bit_depth_combo)
@@ -149,7 +165,30 @@ class OutputControls(QGroupBox):
         self.hint = QLabel(self)
         self.hint.setWordWrap(True)
         self.hint.setObjectName("mutedLabel")
-        advanced_grid.addWidget(self.hint, 6, 0, 1, 5)
+        advanced_grid.addWidget(self.hint, 13, 0, 1, 5)
+        self.cover = CoverControls(self.advanced_widget)
+        advanced_grid.addWidget(self.cover, 6, 0, 1, 5)
+        self.cover.changed.connect(self.changed.emit)
+        self.cookies = CookieControls(self.advanced_widget)
+        advanced_grid.addWidget(self.cookies, 7, 0, 1, 5)
+        self.cookies.changed.connect(self.changed.emit)
+        self.cookies.changed.connect(self._refresh_summary)
+        self.subtitles = SubtitleControls(self.advanced_widget)
+        advanced_grid.addWidget(self.subtitles, 8, 0, 1, 5)
+        self.subtitles.changed.connect(self.changed.emit)
+        self.subtitles.changed.connect(self._refresh_summary)
+        self.network = NetworkControls(self.advanced_widget)
+        advanced_grid.addWidget(self.network, 9, 0, 1, 5)
+        self.network.changed.connect(self.changed.emit)
+        self.naming = NamingControls(self.advanced_widget)
+        advanced_grid.addWidget(self.naming, 10, 0, 1, 5)
+        self.naming.changed.connect(self.changed.emit)
+        self.chapters = ChapterControls(self.advanced_widget)
+        advanced_grid.addWidget(self.chapters, 11, 0, 1, 5)
+        self.chapters.changed.connect(self.changed.emit)
+        self.ranges = RangeControls(self.advanced_widget)
+        advanced_grid.addWidget(self.ranges, 12, 0, 1, 5)
+        self.ranges.changed.connect(self._ranges_changed)
         self.trim_start_edit.textChanged.connect(self._refresh_summary)
         self.trim_end_edit.textChanged.connect(self._refresh_summary)
         self._set_containers()
@@ -160,6 +199,8 @@ class OutputControls(QGroupBox):
                       self.bitrate_combo, self.bit_depth_combo, self.video_quality_combo, self.quality_combo):
             combo.currentIndexChanged.connect(self.refresh)
         self.refresh()
+        self.profiles = ProfileControls(self)
+        grid.addWidget(self.profiles, 0, 0, 1, 3)
         register(self, self._retranslate)
 
     def _field_header(self, topic, label, field):
@@ -202,8 +243,19 @@ class OutputControls(QGroupBox):
         if self.audio_codec_combo.currentData() in ('flac', 'lpcm') and self.bit_depth_combo.currentData() != 'original':
             text += f' · {self.bit_depth_combo.currentText()}'
         start, end = self.trim_start_edit.text().strip(), self.trim_end_edit.text().strip()
-        if start or end:
+        ranges = self.ranges.values()['trim_ranges']
+        if ranges:
+            import re
+            count = len([line for line in re.split(r'[;\n]', ranges) if line.strip()])
+            text += ' · ' + tr('Time ranges: {count}', count=count)
+        elif start or end:
             text += ' · ' + tr('Trim: {start} – {end}', start=start or '0', end=end or tr('end'))
+        if self.cookies.mode_combo.currentData() == 'file':
+            text += ' · ' + tr('Cookie file')
+        elif self.cookies.mode_combo.currentData() == 'browser':
+            text += ' · ' + tr('Browser cookies') + ': ' + self.cookies.browser_combo.currentText()
+        if self.subtitles.mode_combo.currentData() != 'none':
+            text += ' · ' + tr('Subtitles') + ': ' + self.subtitles.mode_combo.currentText()
         self.summary_label.setText(text)
 
     def _audio_format_selected(self):
@@ -276,12 +328,13 @@ class OutputControls(QGroupBox):
 
     def values(self):
         mode = self.mode()
-        return dict(output_mode=mode, format="MP3" if mode == "audio" else "MP4",
+        return dict(**self.cookies.values(), **self.subtitles.values(), **self.network.values(), **self.naming.values(), **self.cover.values(), **self.chapters.values(), **self.ranges.values(), output_mode=mode, format="MP3" if mode == "audio" else "MP4",
                     container=self.container_combo.currentData(),
                     video_codec=self.codec_combo.currentData() if mode == "video" else "original",
                     audio_codec=self.audio_codec_combo.currentData(),
                     audio_bit_depth=self.bit_depth_combo.currentData(),
                     video_quality=self.video_quality_combo.currentData(), audio_bitrate=self.bitrate_combo.currentData(),
+                    trim_download_mode=self.trim_download_combo.currentData(),
                     quality=self.quality_combo.currentText(), codec_mode=CODECS[0],
                     mp3_bitrate=self.bitrate_combo.currentText() if self.bitrate_combo.currentText() in BITRATES else DEFAULTS["mp3_bitrate"])
 
@@ -289,7 +342,7 @@ class OutputControls(QGroupBox):
         combos = (self.format_combo, self.container_combo, self.codec_combo, self.audio_codec_combo,
                   self.video_quality_combo, self.bitrate_combo, self.bit_depth_combo, self.quality_combo, self.workers_spin,
                   self.video_workers_spin, self.ffmpeg_threads_spin)
-        combos += (self.fragment_downloads_spin, self.network_connections_spin)
+        combos += (self.fragment_downloads_spin, self.network_connections_spin, self.trim_download_combo)
         blockers = [QSignalBlocker(widget) for widget in combos]
         self.format_combo.setCurrentIndex(self.format_combo.findData(
             {"video": "MP4", "audio": "MP3"}[data["output_mode"]]))
@@ -305,8 +358,51 @@ class OutputControls(QGroupBox):
         self.ffmpeg_threads_spin.setValue(data.get("ffmpeg_threads", DEFAULTS["ffmpeg_threads"]))
         self.fragment_downloads_spin.setValue(data.get("fragment_downloads", DEFAULTS["fragment_downloads"]))
         self.network_connections_spin.setValue(data.get("network_connections", DEFAULTS["network_connections"]))
+        self.trim_download_combo.setCurrentIndex(self.trim_download_combo.findData(data.get('trim_download_mode', 'section')))
         del blockers
+        self.cookies.restore(data)
+        self.subtitles.restore(data)
+        self.network.restore(data)
+        self.naming.restore(data)
+        self.cover.restore(data)
+        self.chapters.restore(data)
+        self.ranges.restore(data)
+        self._ranges_changed()
         self.refresh()
+
+    def apply_profile(self, options):
+        from saved_profiles import profile_options
+        from task_manager import TaskOptions
+        selected = profile_options(options)
+        # Validate against the live range/connection context before changing widgets.
+        TaskOptions(folder='.', **{**self.values(), **selected}, **self.trim_values())
+        if self.encoders is not None:
+            for key in ('video_codec', 'audio_codec'):
+                codec = selected[key]
+                if key == 'video_codec' and selected['output_mode'] == 'audio':
+                    continue
+                if codec in ENCODERS and not any(encoder in self.encoders for encoder in ENCODERS[codec]):
+                    raise ValueError(f'This profile requires an unavailable encoder: {codec}.')
+        data = {**DEFAULTS, **self.values(), **selected, 'workers': self.workers_spin.value(),
+                'video_workers': self.video_workers_spin.value(), 'ffmpeg_threads': self.ffmpeg_threads_spin.value(),
+                'fragment_downloads': self.fragment_downloads_spin.value(),
+                'network_connections': self.network_connections_spin.value()}
+        blocker = QSignalBlocker(self)
+        self.restore(data)
+        del blocker
+        self.changed.emit()
+
+    def trim_values(self):
+        active = bool(self.ranges.values()['trim_ranges'])
+        return {'trim_start': '' if active else self.trim_start_edit.text().strip(),
+                'trim_end': '' if active else self.trim_end_edit.text().strip()}
+
+    def _ranges_changed(self):
+        active = bool(self.ranges.values()['trim_ranges'])
+        self.trim_start_edit.setEnabled(not active)
+        self.trim_end_edit.setEnabled(not active)
+        self._refresh_summary()
+        self.changed.emit()
 
     def set_encoders(self, encoders):
         self.encoders = set(encoders)
@@ -316,6 +412,7 @@ class OutputControls(QGroupBox):
 
     def refresh(self):
         mode = self.mode()
+        self.subtitles.set_video_supported(mode == 'video')
         video = mode != "audio"
         self.quality_combo.setEnabled(video)
         self.quality_combo.setVisible(video)

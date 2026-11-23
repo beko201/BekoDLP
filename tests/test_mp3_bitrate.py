@@ -95,7 +95,7 @@ class MP3BitrateTests(unittest.TestCase):
             ydl.__enter__ = Mock(return_value=ydl)
             ydl.__exit__ = Mock(return_value=False)
 
-            def managed_ydl(opts, runner, *, request_check=None):
+            def managed_ydl(opts, **kwargs):
                 def extract(url, download):
                     private_source = Path(opts['outtmpl'].replace('%(ext)s', 'm4a'))
                     private_source.write_bytes(b'private source')
@@ -108,7 +108,7 @@ class MP3BitrateTests(unittest.TestCase):
                 return 0
 
             app._run_ffmpeg.side_effect = convert
-            with patch.object(downloader, 'ManagedYoutubeDL', side_effect=managed_ydl):
+            with patch.object(downloader, 'YtDlpProcess', side_effect=managed_ydl):
                 app._complete_via_selector('T1', 1, 'url', 'Example', 'Example', 'MP3',
                                            None, False, '', '', folder=folder)
             cmd = app._run_ffmpeg.call_args.args[2]

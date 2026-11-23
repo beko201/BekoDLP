@@ -78,7 +78,7 @@ class _ComponentNamespace:
         for module in (utils, download_engine, task_manager):
             for name in vars(module):
                 owners.setdefault(name, module)
-        for name in ('psutil', 'run_cmd_capture', 'fetch_ytinfo_with_retry', 'ManagedYoutubeDL',
+        for name in ('psutil', 'run_cmd_capture', 'fetch_ytinfo_with_retry', 'YtDlpProcess',
                      '_extract_urls_from_input'):
             owners[name] = download_engine
         object.__setattr__(self, '_owners', owners)
