@@ -7,6 +7,13 @@ import shutil
 import tempfile
 import time
 from copy import deepcopy
+from cookie_options import COOKIE_DEFAULTS, COOKIE_BROWSERS, validate_cookie_options
+from subtitle_options import SUBTITLE_DEFAULTS, SUBTITLE_MODES, validate_subtitle_options
+from network_options import NETWORK_DEFAULTS, validate_network_options
+from naming_templates import NAMING_DEFAULTS, validate_naming_options
+from cover_options import COVER_DEFAULTS
+from chapter_options import CHAPTER_DEFAULTS
+from range_options import RANGE_DEFAULTS, parse_ranges
 from media_options import OUTPUT_DEFAULTS, AUDIO_BIT_DEPTHS, AUDIO_BITRATES, VIDEO_CODECS, AUDIO_CODECS, CONTAINERS, validate_output_options
 
 SCHEMA_VERSION = 1
@@ -28,6 +35,14 @@ DEFAULTS = dict(schema_version=SCHEMA_VERSION, language='en', last_folder="", wo
                 codec_mode=CODECS[0], log_max_bytes=5 * 1024 * 1024,
                 log_backup_count=3, log_repeat_seconds=60)
 DEFAULTS.update(OUTPUT_DEFAULTS)
+DEFAULTS.update(NAMING_DEFAULTS)
+DEFAULTS.update(COVER_DEFAULTS)
+DEFAULTS.update(CHAPTER_DEFAULTS)
+DEFAULTS.update(RANGE_DEFAULTS)
+DEFAULTS.update(COOKIE_DEFAULTS)
+DEFAULTS.update(SUBTITLE_DEFAULTS)
+DEFAULTS.update(NETWORK_DEFAULTS)
+DEFAULTS['saved_profiles'] = []
 
 
 class UnsupportedSettingsVersion(ValueError):
@@ -66,7 +81,9 @@ def validate_settings(data):
         result.setdefault("audio_bit_depth", "16" if result["audio_codec"] == "pcm_s16le" else "24")
         result["audio_codec"] = "lpcm"
     issues = []
-    choices = {"language": ('en', 'tr'), "format": ("MP4", "MP3"), "quality": QUALITIES,
+    choices = {"language": ('en', 'tr'), 'chapter_mode': ('none', 'embed', 'split'), 'embed_cover': ('off', 'on'), 'trim_download_mode': ('section', 'full'), 'subtitle_mode': SUBTITLE_MODES, 'subtitle_auto': ('off', 'on'),
+               'subtitle_format': ('srt', 'vtt'), "cookie_mode": ('none', 'file', 'browser'),
+               "cookie_browser": COOKIE_BROWSERS, "format": ("MP4", "MP3"), "quality": QUALITIES,
                "mp3_bitrate": BITRATES, "codec_mode": CODECS,
                "output_mode": ("video", "audio"), "container": tuple(CONTAINERS),
                "video_codec": tuple(VIDEO_CODECS), "audio_codec": tuple(AUDIO_CODECS),
@@ -87,6 +104,8 @@ def validate_settings(data):
         elif key in ranges:
             low, high = ranges[key]
             valid = type(value) is int and low <= value <= high
+        elif key in ('cookie_file', 'cookie_profile', 'subtitle_languages', 'proxy_mode', 'proxy_url', 'download_rate'):
+            valid = isinstance(value, str) and len(value) <= 32768 and not any(c in value for c in '\x00\r\n')
         elif key == "last_folder":
             valid = isinstance(value, str) and "\x00" not in value
         if not valid:
@@ -98,6 +117,38 @@ def validate_settings(data):
     except ValueError:
         issues.append("output profile")
         result.update(OUTPUT_DEFAULTS)
+    try:
+        validate_cookie_options(result)
+    except ValueError:
+        issues.append('cookie settings')
+        result.update(COOKIE_DEFAULTS)
+    try:
+        validate_subtitle_options(result)
+    except ValueError:
+        issues.append('subtitle settings')
+        result.update(SUBTITLE_DEFAULTS)
+    try:
+        validate_network_options(result)
+    except ValueError:
+        issues.append('network settings')
+        result.update(NETWORK_DEFAULTS)
+    try:
+        validate_naming_options(result)
+    except ValueError:
+        issues.append('naming templates')
+        result.update(NAMING_DEFAULTS)
+    try:
+        parse_ranges(result['trim_ranges'])
+    except ValueError:
+        issues.append('trim_ranges')
+        result.update(RANGE_DEFAULTS)
+    if result['trim_ranges'].strip() and result['chapter_mode'] == 'split':
+        issues.append('chapter_mode')
+        result['chapter_mode'] = 'none'
+    from saved_profiles import recover_profiles
+    result['saved_profiles'], invalid_profiles = recover_profiles(result['saved_profiles'])
+    if invalid_profiles:
+        issues.append('saved_profiles')
     return result, issues
 
 

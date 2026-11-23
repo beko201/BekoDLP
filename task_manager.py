@@ -13,6 +13,16 @@ import download_engine
 from settings import MAX_WORKERS
 from media_options import validate_output_options
 from resolved_info_cache import ResolvedInfoCache
+from task_storage import TaskRecord, CancellationEvent
+from queue_store import task_state, validate_document, SCHEMA_VERSION as QUEUE_SCHEMA_VERSION
+from cookie_options import validate_cookie_options, cookie_kwargs
+from subtitle_options import validate_subtitle_options
+from network_options import validate_network_options, network_kwargs
+from naming_templates import validate_naming_options, uses_playlist_naming
+from cover_options import validate_cover_options
+from chapter_options import validate_chapter_options
+from range_options import validate_range_options
+from source_formats import validate_source_options
 from utils import (
     DEFAULT_WORKERS, DownloadCancelled, PlaylistLinkNotAllowed, normalize_url,
     validate_trim_range, format_eta, format_mb, log_error, log_warning,
@@ -60,6 +70,7 @@ class TaskOptions:
     mp3_bitrate: str = "192k"
     trim_start: str = ""
     trim_end: str = ""
+    trim_download_mode: str = 'full'
     output_mode: str = "legacy"  # Preserve the existing headless API; the UI submits an explicit mode.
     container: str = "auto"
     video_codec: str = "original"
@@ -67,10 +78,45 @@ class TaskOptions:
     audio_bit_depth: str = "original"
     audio_bitrate: str = "192k"
     video_quality: str = "balanced"
+    cookie_mode: str = 'none'
+    cookie_file: str = ''
+    cookie_browser: str = 'chrome'
+    cookie_profile: str = ''
+    subtitle_mode: str = 'none'
+    subtitle_languages: str = 'tr,en'
+    subtitle_auto: str = 'off'
+    subtitle_format: str = 'srt'
+    proxy_mode: str = 'system'
+    proxy_url: str = ''
+    download_rate: str = ''
+    source_selection: str = 'auto'
+    source_video_id: str = ''
+    source_audio_id: str = ''
+    filename_template: str = '{title}'
+    subfolder_template: str = ''
+    playlist_title: str = ''
+    playlist_index: str = ''
+    embed_cover: str = 'off'
+    chapter_mode: str = 'none'
+    trim_ranges: str = ''
 
     def __post_init__(self):
         validate_trim_range(self.trim_start, self.trim_end)
         validate_output_options(asdict(self))
+        if self.trim_download_mode == 'section' and (self.trim_start or self.trim_end) and self.output_mode == 'legacy':
+            raise ValueError('Section downloading requires an explicit video or audio output profile.')
+        validate_cookie_options(asdict(self))
+        validate_subtitle_options(asdict(self))
+        validate_network_options(asdict(self))
+        validate_source_options(asdict(self))
+        validate_naming_options(asdict(self))
+        validate_cover_options(asdict(self))
+        validate_chapter_options(asdict(self))
+        validate_range_options(asdict(self))
+        if self.chapter_mode != 'none' and self.output_mode == 'legacy':
+            raise ValueError('Chapter processing requires an explicit video or audio output profile.')
+        if self.cookie_file:
+            object.__setattr__(self, 'cookie_file', os.path.abspath(self.cookie_file))
         object.__setattr__(self, "folder", os.path.abspath(self.folder) if self.folder else "")
         object.__setattr__(self, "mp3_bitrate", self.mp3_bitrate or "192k")
 
@@ -178,16 +224,27 @@ class PlaylistFetcher(threading.Thread):
                 return
             notes = []
             resolved_info = {}
+            entry_context = {}
             added_count = submitted_count = 0
             def accept_batch(urls):
                 nonlocal added_count, submitted_count
                 if self.manager._shutdown_event.is_set():
                     raise DownloadCancelled()
-                added_count += len(self.manager.add_urls(urls, self.options, resolved_info=resolved_info, notify=False))
+                context = {'entry_context': entry_context} if uses_playlist_naming(asdict(self.options)) else {}
+                added_count += len(self.manager.add_urls(urls, self.options, resolved_info=resolved_info, notify=False, **context))
+                for candidate in urls:
+                    entry_context.pop(candidate, None)
                 submitted_count += len(urls)
+            input_url = self.raw_input_url
+            if self.expand_playlist and uses_playlist_naming(asdict(self.options)):
+                from playlist_selection import playlist_input_url
+                input_url = playlist_input_url(input_url)
             urls = download_engine._extract_urls_from_input(
-                self.raw_input_url, self.expand_playlist, notes,
+                input_url, self.expand_playlist, notes,
                 cancel_event=self.manager._shutdown_event, resolved_info=resolved_info,
+                **cookie_kwargs(asdict(self.options)),
+                **network_kwargs(asdict(self.options)),
+                **({'entry_context': entry_context} if uses_playlist_naming(asdict(self.options)) else {}),
                 on_batch=accept_batch if self.expand_playlist else None)
             if self.manager._shutdown_event.is_set():
                 return
@@ -224,6 +281,10 @@ class TaskManager:
         self._progress_sum = 0.0
         self._progress_correction = 0.0
         self._action_revision = 0
+        self._queue_revision = 0
+        self._queue_rows = {}
+        self._restart_after_shutdown = set()
+        self._restored_queue_paused = False
         self._resolved_info = ResolvedInfoCache()
         self.task_counter = 0
         self.task_queue = Queue()
@@ -277,7 +338,7 @@ class TaskManager:
 
     @staticmethod
     def _snapshot(task):
-        result = dict(task)
+        result = task.snapshot() if isinstance(task, TaskRecord) else dict(task)
         if "warnings" in result:
             result["warnings"] = list(result["warnings"])
         return result
@@ -290,6 +351,75 @@ class TaskManager:
     def list_tasks(self):
         with self.tasks_lock:
             return [self._snapshot(task) for task in self.tasks.values()]
+
+    def completion_snapshot(self):
+        with self.tasks_lock:
+            return ({tid: {key: task.get(key) for key in ('status', 'output_path')}
+                     for tid, task in self.tasks.items()},
+                    bool(self._pending_link_keys or self.tid_to_workerid), self.paused, self._closing)
+
+    @property
+    def queue_revision(self):
+        with self.tasks_lock:
+            return self._queue_revision
+
+    def queue_snapshot(self):
+        """Persist source URLs and task choices, never expiring media metadata or process state."""
+        with self.tasks_lock:
+            # Copy only private mutable state under the lock. Expanding shared
+            # options into the on-disk schema happens after releasing workers.
+            tasks = [task.frozen_copy() if isinstance(task, TaskRecord) else self._snapshot(task)
+                     for task in self.tasks.values()]
+            restarting = self._restart_after_shutdown.copy()
+            revision = self._queue_revision
+        rows = []
+        for task in tasks:
+            state = task_state(task, restarting)
+            rows.append(dict(id=task['id'], url=task['url'], title=task['title'], state=state,
+                status=task['status'] if state in ('completed', 'failed') else '',
+                options={name: task.get(name, field.default) for name, field in TaskOptions.__dataclass_fields__.items()},
+                output_path=task.get('output_path') if state == 'completed' else None,
+                warnings=list(task.get('warnings', [])), attempt=task.get('attempt', 0)))
+        return revision, dict(schema_version=QUEUE_SCHEMA_VERSION, tasks=rows)
+
+    def restore_queue(self, document):
+        """Restore before workers start. Pending work waits for an explicit Resume."""
+        document = validate_document(document)
+        with self.tasks_lock:
+            if self.tasks or self.workers or self._closing:
+                raise ValueError('Restore the queue before starting tasks or workers.')
+            pending = False
+            shared_options = {}
+            for row in document['tasks']:
+                tid, state = row['id'], row['state']
+                status = {'pending': 'Queued', 'completed': 'Completed',
+                          'failed': 'Error: Previous download failed', 'cancelled': 'Cancelled'}[state]
+                if state in ('completed', 'failed') and row['status'].startswith(('Completed' if state == 'completed' else 'Error')):
+                    status = row['status']
+                option_key = tuple(row['options'].items())
+                options = shared_options.setdefault(option_key, row['options'])
+                task = TaskRecord(options, id=tid, url=row['url'], title=row['title'],
+                        status=status, progress=100 if state == 'completed' else 0,
+                        output_path=row['output_path'], warnings=row['warnings'], attempt=row['attempt'])
+                self.tasks[tid] = task
+                self.task_counter = max(self.task_counter, int(tid[1:]))
+                self.cancel_events[tid] = CancellationEvent()
+                if state == 'cancelled':
+                    self.cancel_events[tid].set()
+                if state == 'pending':
+                    pending = True
+                    self.active_urls.add(row['url'])
+                    self._active_url_owners[row['url']] = tid
+                    self.task_queue.put((tid, row['url']))
+                self._sync_summary_task(tid)
+                self._emit_task('task_added', tid, task)
+            if pending:
+                self.paused = True
+                self._restored_queue_paused = True
+                self.emit('pause_changed', paused=True)
+        if document['tasks']:
+            self._update_queue_label()
+        return len(document['tasks'])
 
     def get_tasks(self, tids):
         """Read a changed batch under one lock, omitting tasks already removed."""
@@ -324,6 +454,14 @@ class TaskManager:
         with self.tasks_lock:
             return self._has_update_work_locked()
 
+    def activate_tool_update(self, activate):
+        """Prevent tasks/resolvers entering while an idle tool switch is committed."""
+        with self.tasks_lock:
+            if self._closing or self._has_update_work_locked():
+                return False
+            activate()
+            return True
+
     def _add_summary_progress(self, value):
         # Compensate additions/removals so repeated fractional updates do not
         # gradually move the displayed average across a rounding boundary.
@@ -337,6 +475,17 @@ class TaskManager:
     def _sync_summary_task(self, tid):
         """Update one contribution; caller holds tasks_lock, including worker cleanup."""
         task = self.tasks.get(tid)
+        durable = None
+        if task is not None:
+            state = task_state(task, self._restart_after_shutdown, tid)
+            durable = (state, task.get('title'), task.get('output_path') if state == 'completed' else None,
+                       task['status'] if state in ('completed', 'failed') else '')
+        if self._queue_rows.get(tid) != durable:
+            self._queue_revision += 1
+            if durable is None:
+                self._queue_rows.pop(tid, None)
+            else:
+                self._queue_rows[tid] = durable
         previous = self._summary_rows.get(tid)
         current = None
         if task is not None:
@@ -381,6 +530,7 @@ class TaskManager:
                 warnings = self.tasks[tid].setdefault("warnings", [])
                 if message not in warnings:
                     warnings.append(message)
+                    self._queue_revision += 1
 
     def should_check_disk(self, tid, now):
         with self.tasks_lock:
@@ -432,6 +582,7 @@ class TaskManager:
             if task is None:
                 return None
             task['attempt'] = task.get('attempt', 0) + 1
+            self._queue_revision += 1
             task['_log_stage'] = 'resolve'
             return task['attempt']
 
@@ -507,13 +658,17 @@ class TaskManager:
             self._resolved_info.prune()
             return self._resolved_info.pop(tid, None)
 
-    def add_urls(self, urls, options, *, resolved_info=None, notify=True):
+    def add_urls(self, urls, options, *, resolved_info=None, notify=True, entry_context=None):
         if self._closing:
             return []
         added, skipped = [], 0
         option_fields = asdict(options)
         for url in urls:
             norm = normalize_url(url)
+            context = (entry_context or {}).get(norm, {})
+            naming_context = {key: context[key] for key in ('playlist_title', 'playlist_index') if key in context}
+            if naming_context:
+                validate_naming_options({**option_fields, **naming_context})
             info = resolved_info.get(norm) if resolved_info else None
             info_size = self._resolved_info.prepare(info) if info is not None else None
             with self.tasks_lock:
@@ -524,16 +679,16 @@ class TaskManager:
                     continue
                 self.task_counter += 1
                 tid = f"T{self.task_counter}"
-                task = {**option_fields, "id": tid, "url": norm,
-                        "title": "(resolving title...)", "status": "Queued",
-                        "progress": 0, "output_path": None, "attempt": 0}
+                task = TaskRecord(option_fields, **naming_context, id=tid, url=norm,
+                        title="(resolving title...)", status="Queued",
+                        progress=0, output_path=None, attempt=0)
                 self.tasks[tid] = task
                 self._sync_summary_task(tid)
                 if info is not None:
                     self._resolved_info.put(tid, info, info_size)
                 self.active_urls.add(norm)
                 self._active_url_owners[norm] = tid
-                self.cancel_events[tid] = threading.Event()
+                self.cancel_events[tid] = CancellationEvent()
                 self._emit_task("task_added", tid, task)
                 self.task_queue.put((tid, norm))
                 added.append(tid)
@@ -565,7 +720,8 @@ class TaskManager:
         with self._worker_slots:
             while not (self._closing or self._shutdown_event.is_set() or worker._stop_event.is_set()):
                 slot = self.workers.index(worker) if worker in self.workers else 0
-                if slot < self.worker_count and len(self.tid_to_workerid) < self.worker_count:
+                if ((not self.paused or not self._restored_queue_paused)
+                        and slot < self.worker_count and len(self.tid_to_workerid) < self.worker_count):
                     return True
                 self._worker_slots.wait(timeout=0.2)
         return False
@@ -623,9 +779,13 @@ class TaskManager:
             self._worker_slots.notify_all()
 
     def toggle_pause(self):
-        if not self._closing:
-            self.paused = not self.paused
-            self.emit("pause_changed", paused=self.paused)
+        with self._worker_slots:
+            if not self._closing:
+                self.paused = not self.paused
+                if not self.paused:
+                    self._restored_queue_paused = False
+                self.emit("pause_changed", paused=self.paused)
+                self._worker_slots.notify_all()
         return self.paused
 
     def clear_list(self, remove_pending=False):
@@ -721,6 +881,9 @@ class TaskManager:
             if require_idle and self._has_update_work_locked():
                 return False
             self._closing = True
+            self._restart_after_shutdown = {tid for tid, task in self.tasks.items()
+                                            if task_state(task) == 'pending'}
+            self._queue_revision += 1
             self._resolved_info.clear()
             self._shutdown_phase = "grace"
             self._shutdown_deadline = self._shutdown_clock() + self.shutdown_grace_seconds
@@ -811,7 +974,7 @@ class TaskManager:
                 return False
             ev = self.cancel_events.get(tid)
             if ev is None:
-                ev = threading.Event()
+                ev = CancellationEvent()
                 self.cancel_events[tid] = ev
             ev.set()
             worker_id = self.tid_to_workerid.get(tid)
@@ -978,7 +1141,7 @@ class TaskManager:
                 url = t["url"]
                 self.active_urls.add(url)
                 self._active_url_owners[url] = tid
-                self.cancel_events[tid] = threading.Event()
+                self.cancel_events[tid] = CancellationEvent()
                 self.stream_progress.pop(tid, None)
                 self.download_speed_history.pop(tid, None)
                 t["progress"] = 0

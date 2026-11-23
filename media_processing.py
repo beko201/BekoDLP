@@ -1,6 +1,7 @@
 """Execute output plans with the engine's existing process and file management."""
 import os
 import math
+from copy import copy
 
 from media_options import canonical_codec, validate_output_options
 from media_plan import StreamAction, build_output_plan, read_bit_depth
@@ -8,6 +9,10 @@ from media_probe import probe_duration
 from media_sources import SourcePreparer, read_ebml_doctype, read_mp4_faststart
 from utils import DownloadCancelled, InsufficientDiskSpace, validate_trim_range, log_warning
 from errors import MediaOperationError
+from chapter_options import ChapterBatch, ChapterPart, chapter_ranges
+from naming_templates import render_naming
+from utils import safe_filename
+from range_options import validate_range_options
 
 
 def build_ffmpeg_command(ffmpeg, sources, plan, destination, *, trim=None):
@@ -91,15 +96,29 @@ class ConfiguredOutput:
 
     def _process(self, tid, worker, url, info, task, folder, title):
         validate_output_options(task)
+        ranges = validate_range_options(task)
+        if ranges:
+            return self.process_ranges(tid, worker, url, info, task, folder, ranges)
         start, end = validate_trim_range(task.get("trim_start", ""), task.get("trim_end", ""))
         trim = (start, end) if start is not None or end is not None else None
         sources = self.sources.prepare(tid, worker, url, info, task, folder)
+        origin = sources.timeline_origin if sources.section_downloaded else 0
+        if sources.section_downloaded:
+            start = max(0, (start or 0) - origin)
+            end = max(0, end - origin) if end is not None else None
+            trim = (start, end)
+            if task.get('subtitle_mode', 'none') != 'none' or task.get('chapter_mode', 'none') != 'none':
+                self.engine._record_subtitle_start(tid, origin)
         self.check_cancelled(tid)
         plan = build_output_plan(task, sources)
         if plan.needs_encoders:
             plan = build_output_plan(task, sources, self.engine.available_encoders())
         for warning in plan.warnings:
             self.manager.add_warning(tid, warning)
+        if task.get('chapter_mode', 'none') == 'split':
+            batch = self.split_chapters(tid, worker, info, task, folder, sources, plan, origin, start, end)
+            if batch is not None:
+                return batch
         destination = self.reserve_destination(tid, folder, title, plan)
         if trim is None:
             self.execute_plan(tid, worker, sources, plan, destination, task)
@@ -122,9 +141,11 @@ class ConfiguredOutput:
                 if not math.isfinite(duration) or duration <= 0:
                     raise MediaOperationError("The trimmed file does not have a positive finite duration.")
                 self.check_cancelled(tid)
+                if task.get('subtitle_mode', 'none') != 'none' or task.get('chapter_mode', 'none') != 'none':
+                    self.engine._record_subtitle_start(tid, origin + (effective_trim[0] or 0))
                 if start and aligned_start is not None and start - aligned_start >= .05:
                     self.manager.add_warning(tid,
-                        f'Original video trimming starts at {aligned_start:.3f}s instead of {start:.3f}s '
+                        f'Original video trimming starts at {origin + aligned_start:.3f}s instead of {origin + start:.3f}s '
                         'to keep audio and video synchronized at a keyframe. '
                         'Frame-exact trimming requires video re-encoding.')
             except (DownloadCancelled, InsufficientDiskSpace):
@@ -139,10 +160,110 @@ class ConfiguredOutput:
                     os.remove(destination)
                 self.execute_plan(tid, worker, sources, plan, destination, task)
                 self.verify_destination(tid, destination, plan)
-                self.manager.add_warning(tid, "Trimming could not be applied; the full file was saved")
+                self.manager.add_warning(tid, 'Trimming could not be applied; the downloaded section was saved'
+                    if sources.section_downloaded else 'Trimming could not be applied; the full file was saved')
             self.manager.report_stage_progress(tid, "trimming", 1)
         self.manager.report_stage_progress(tid, "verification", 1)
         return destination
+
+    def process_ranges(self, tid, worker, url, info, task, folder, ranges):
+        """Download each requested section, or reuse one full source, without cut fallback."""
+        original_duration = info.duration
+        if original_duration and any(start >= original_duration for start, _ in ranges):
+            raise MediaOperationError('A time range starts beyond the source duration.')
+        metadata, _ = info._media_info.snapshot()
+        name, title_budget = self.batch_naming(task, metadata or {})
+        shared = None
+        section = task.get('trim_download_mode', 'full') == 'section'
+        if not section:
+            full_task = dict(task, trim_ranges='', trim_start='', trim_end='')
+            shared = self.sources.prepare(tid, worker, url, copy(info), full_task, folder)
+        parts = []
+        for index, (start, end) in enumerate(ranges, 1):
+            self.check_cancelled(tid)
+            self.engine._wait_for_download_resume(tid)
+            part_folder = os.path.join(folder, f'range-{index:03d}')
+            os.mkdir(part_folder)
+            subtask = dict(task, trim_ranges='', trim_start=str(start), trim_end=str(end))
+            source_info = copy(info)
+            source_info.duration = original_duration
+            sources = (self.sources.prepare(tid, worker, url, source_info, subtask, part_folder)
+                       if section else shared)
+            origin = sources.timeline_origin if sources.section_downloaded else 0
+            begin = max(0, start - origin)
+            finish = end - origin
+            if sources.duration:
+                if begin >= sources.duration:
+                    raise MediaOperationError('A time range starts beyond the source duration.')
+                finish = min(finish, sources.duration)
+            if finish <= begin:
+                raise MediaOperationError('A time range has no media to save.')
+            plan = build_output_plan(subtask, sources)
+            if plan.needs_encoders:
+                plan = build_output_plan(subtask, sources, self.engine.available_encoders())
+            for warning in plan.warnings:
+                self.manager.add_warning(tid, warning)
+            aligned = begin
+            if begin and plan.video.action == StreamAction.COPY:
+                video = plan.video.source
+                aligned = self.engine._ffprobe_copy_start(sources.paths[video.input_number], video.stream_index, begin)
+                if begin - aligned >= .05:
+                    self.manager.add_warning(tid, f'Range {index} starts at {origin + aligned:.3f}s instead of '
+                        f'{start:.3f}s to preserve copied video at a keyframe. Re-encode video for exact cuts.')
+            title = safe_filename(f'{index:03d} - {start:.3f}-{end:.3f}')[:title_budget]
+            destination = self.reserve_destination(tid, part_folder, title, plan)
+            self.execute_plan(tid, worker, sources, plan, destination, subtask,
+                              trim=(aligned, finish), strip_chapters=True)
+            probe = self.verify_destination(tid, destination, plan)
+            duration = probe_duration(probe)
+            if not math.isfinite(duration) or duration <= 0:
+                raise MediaOperationError('A time range produced an empty file.')
+            parts.append(ChapterPart(destination, origin + aligned))
+        return ChapterBatch(tuple(parts), name, 'clips')
+
+    @staticmethod
+    def batch_naming(task, metadata):
+        folders, name = render_naming(task, metadata)
+        root_size = len(os.path.abspath(task['folder']).encode('utf-16-le')) // 2
+        budget = 240 - root_size - sum(len(part) + 1 for part in folders) - 40
+        if budget < 28:
+            raise MediaOperationError('The output path is too long. Use a shorter folder template or download folder.')
+        name = safe_filename(name[:min(80, budget - 16)])
+        return name, min(100, budget - len(name))
+
+    def split_chapters(self, tid, worker, info, task, folder, sources, plan, origin, start, end):
+        metadata, _ = info._media_info.snapshot()
+        metadata = metadata or {}
+        stop = min(end, sources.duration) if end is not None and sources.duration else end or sources.duration
+        if not stop or not math.isfinite(stop):
+            raise MediaOperationError('The source duration is required to split chapters.')
+        chapters = chapter_ranges(metadata, origin + (start or 0), origin + stop)
+        if not chapters:
+            self.manager.add_warning(tid, 'No source chapters were available in this range; the normal output was kept.')
+            return None
+        if len(metadata.get('chapters') or []) > 1000:
+            self.manager.add_warning(tid, 'Only the first 1000 source chapters were processed.')
+        name, title_budget = self.batch_naming(task, metadata)
+        parts = []
+        for chapter in chapters:
+            self.check_cancelled(tid)
+            begin, finish = chapter.start - origin, chapter.end - origin
+            aligned = begin
+            if begin and plan.video.action == StreamAction.COPY:
+                video = plan.video.source
+                aligned = self.engine._ffprobe_copy_start(sources.paths[video.input_number], video.stream_index, begin)
+                if begin - aligned >= .05:
+                    self.manager.add_warning(tid, f'Chapter {chapter.number} starts at {origin + aligned:.3f}s instead of '
+                        f'{chapter.start:.3f}s to preserve copied video at a keyframe. Re-encode video for exact cuts.')
+            title = f'{chapter.number:03d} - ' + safe_filename(chapter.title)[:title_budget]
+            destination = self.reserve_destination(tid, folder, title, plan)
+            self.execute_plan(tid, worker, sources, plan, destination, task, trim=(aligned, finish))
+            probe = self.verify_destination(tid, destination, plan)
+            duration = probe_duration(probe)
+            if not math.isfinite(duration) or duration <= 0:
+                raise MediaOperationError('A chapter file does not have a positive finite duration.')
+            parts.append(ChapterPart(destination, origin + aligned))
+        return ChapterBatch(tuple(parts), name)
 
     def verify_destination(self, tid, destination, plan):
         self.check_cancelled(tid)
@@ -164,11 +285,13 @@ class ConfiguredOutput:
         suffix = "." + plan.extension if plan.extension else ""
         return self.engine._dedupe_path(os.path.join(folder, title + suffix), tid)
 
-    def execute_plan(self, tid, worker, sources, plan, destination, task, *, trim=None):
+    def execute_plan(self, tid, worker, sources, plan, destination, task, *, trim=None, strip_chapters=False):
         if plan.preserve_original_file and trim is None:
             self.engine._replace_media(sources.paths[0], destination)
             return
         command = build_ffmpeg_command(self.engine.ffmpeg, sources, plan, destination, trim=trim)
+        if strip_chapters or task.get('chapter_mode', 'none') == 'split':
+            command[-1:-1] = ['-map_chapters', '-1']
         converting = any(s.action == StreamAction.ENCODE for s in (plan.video, plan.audio))
         reserve = sum(os.path.getsize(path) for path in sources.paths) * (4 if converting else 1.1)
         audio = plan.audio

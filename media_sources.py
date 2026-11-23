@@ -1,5 +1,7 @@
 """Source selection, managed downloads and inspection of actual downloaded media."""
 from pathlib import Path
+from dataclasses import replace
+import math
 import os
 import re
 import traceback
@@ -7,8 +9,9 @@ import traceback
 from media_options import canonical_codec, resolution_height
 from media_plan import MediaSources, SourceStream, read_bit_depth
 from media_probe import probe_duration
-from utils import DownloadCancelled, _network_options, safe_filesize
+from utils import DownloadCancelled, _check_cancelled, _network_options, safe_filesize
 from errors import MediaOperationError
+from source_formats import selected_sources
 
 
 MAX_EBML_HEADER_BYTES = 64 * 1024
@@ -111,10 +114,27 @@ class SourcePreparer:
 
     def prepare(self, tid, worker, url, info, task, folder):
         selection = self.select_sources(info, task)
-        paths = self.download_sources(tid, worker, url, info, selection, task, folder)
+        section = task.get('trim_download_mode', 'full') == 'section' and bool(task.get('trim_start') or task.get('trim_end'))
+        if section:
+            from section_download import download_section
+            paths = download_section(self, tid, worker, url, info, selection, task, folder)
+        else:
+            paths = self.download_sources(tid, worker, url, info, selection, task, folder)
         if self.manager.is_cancelled(tid):
             raise DownloadCancelled()
         sources = self.inspect_sources(paths, info.duration)
+        if section:
+            probe = self.engine._ffprobe_media(paths[0])
+            origin = float(probe['format'].get('start_time') or 0)
+            from utils import validate_trim_range
+            start, end = validate_trim_range(task.get('trim_start', ''), task.get('trim_end', ''))
+            if not math.isfinite(origin) or origin < -.1 or origin > (start or 0) + .1:
+                raise MediaOperationError('The section timeline could not be verified. Select full download and trim.')
+            if end is not None and info.duration:
+                end = min(end, info.duration)
+            if end is not None and sources.duration and origin + sources.duration < end - .25:
+                raise MediaOperationError('The downloaded section ended before the requested end time.')
+            sources = replace(sources, timeline_origin=origin, section_downloaded=True)
         if sources.duration and sources.duration != info.duration:
             info.duration = sources.duration
             self.manager.update_metadata(tid, duration=info.duration)
@@ -122,6 +142,9 @@ class SourcePreparer:
 
     @staticmethod
     def select_sources(info, task):
+        explicit = selected_sources(info, task) if task.get('source_selection', 'auto') == 'manual' else None
+        if explicit is not None:
+            return explicit
         want_video, want_audio = task.get("video_codec", "original"), task.get("audio_codec", "original")
         if task["output_mode"] == "audio":
             stream = SourcePreparer._prefer(info.audio_only_formats(), want_audio, "audio_codec")
@@ -207,14 +230,17 @@ class SourcePreparer:
     def _extension(value):
         return value if re.fullmatch(r"[a-zA-Z0-9_]{1,12}", value or "") else "bin"
 
-    def _selector(self, tid, worker, url, info, task, folder):
-        from download_engine import ManagedYoutubeDL
+    @staticmethod
+    def selector_expression(task):
         height = 0 if task["output_mode"] == "audio" else resolution_height(task["quality"])
-        selector = "ba/b" if task["output_mode"] == "audio" else (
+        return "ba/b" if task["output_mode"] == "audio" else (
             f"bv*[height<={height}]+ba/b[height<={height}]" if task["audio_codec"] != "none"
             else f"bv[height<={height}]/b[height<={height}]")
+
+    def _selector(self, tid, worker, url, info, task, folder):
+        selector = self.selector_expression(task)
         def hook(data):
-            self.engine._wait_for_download_resume(tid)
+            _check_cancelled(self.manager.task_control(tid)[0])
             if data.get("status") in ("downloading", "finished"):
                 finished = data.get("status") == "finished"
                 downloaded = data.get("downloaded_bytes") or 0
@@ -230,10 +256,7 @@ class SourcePreparer:
             streams = 2 if task["output_mode"] != "audio" and task["audio_codec"] != "none" else 1
             with self.engine.media_download_session(tid, streams=streams) as network:
                 options.update(network)
-                with ManagedYoutubeDL(options, lambda cmd: self.engine._run_ffmpeg(
-                        tid, worker, cmd, info.duration, "Preparing source streams", check=False,
-                        progress_stage="downloading"),
-                        request_check=lambda: self.engine._wait_for_download_resume(tid)) as ydl:
+                with self.engine.ytdlp_process(options, tid, folder=folder) as ydl:
                     result = self.engine._download_from_info(ydl, url, info._media_info,
                                                              self.manager.task_control(tid)[0], tid=tid)
         except BaseException as error:

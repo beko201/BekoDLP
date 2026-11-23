@@ -28,6 +28,8 @@ class MediaSources:
     major_brands: tuple[str, ...] = ()
     ebml_doctypes: tuple[str | None, ...] = ()
     mp4_faststart: tuple[bool, ...] = ()
+    timeline_origin: float = 0.0
+    section_downloaded: bool = False
 
 
 class StreamAction(Enum):

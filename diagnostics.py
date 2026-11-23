@@ -49,19 +49,27 @@ def _package_version(name):
         return 'unavailable (not installed)'
 
 
+def invalidate_runtime_info():
+    """A manual tool update invalidates the process's version snapshot."""
+    global _RUNTIME_INFO
+    with _RUNTIME_LOCK:
+        _RUNTIME_INFO = None
+
+
 def get_runtime_info(ffmpeg=None, ffprobe=None):
     """Collect one bounded version snapshot per process and return a copy."""
     global _RUNTIME_INFO
     with _RUNTIME_LOCK:
         if _RUNTIME_INFO is None:
-            yt_version = getattr(getattr(utils.yt_dlp, 'version', None), '__version__', 'unknown')
+            from ytdlp_process import executable_version
+            yt_version = executable_version()
             _RUNTIME_INFO = {'Application': f'{APP_NAME} {APP_VERSION}',
                              'Python': platform.python_version(), 'Platform': platform.system(),
                              'yt-dlp': yt_version, 'PySide6': _package_version('PySide6'),
                              'FFmpeg': _tool_version('ffmpeg', ffmpeg),
                              'ffprobe': _tool_version('ffprobe', ffprobe),
                              'Deno': _tool_version('deno', utils.portable_deno_path()),
-                             'yt-dlp-ejs': _package_version('yt-dlp-ejs')}
+                             'yt-dlp backend': 'external executable (bundled EJS)'}
         return dict(_RUNTIME_INFO)
 
 

@@ -14,7 +14,8 @@ ENCODERS = {"h264": ("libx264",), "hevc": ("libx265",), "vp9": ("libvpx-vp9",),
             "av1": ("libsvtav1", "libaom-av1"), "aac": ("aac",), "mp3": ("libmp3lame",),
             "opus": ("libopus",), "flac": ("flac",), "lpcm": ("pcm_s16le", "pcm_s24le")}
 OUTPUT_DEFAULTS = dict(output_mode="video", container="auto", video_codec="original",
-                       audio_codec="original", audio_bit_depth="original", audio_bitrate="192k", video_quality="balanced")
+                       audio_codec="original", audio_bit_depth="original", audio_bitrate="192k", video_quality="balanced",
+                       trim_download_mode='section')
 AUDIO_BIT_DEPTHS = ("original", "16", "24")
 AUTOMATIC_AUDIO_BITRATES = {"mp3": "192k", "aac": "192k", "opus": "128k"}
 AUDIO_BITRATES = ("auto", "64k", "96k", "128k", "160k", "192k", "256k", "320k")
@@ -51,6 +52,8 @@ def allowed_codecs(mode, container):
 
 
 def validate_output_options(data):
+    if data.get('trim_download_mode', 'full') not in ('section', 'full'):
+        raise ValueError('Unknown trim download mode.')
     mode = data.get("output_mode", "legacy")
     if mode == "legacy":
         return

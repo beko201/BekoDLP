@@ -18,7 +18,7 @@ REQUIRED_FILES = {APP_EXECUTABLE, '_internal/base_library.zip',
     '_internal/PySide6/QtCore.pyd', '_internal/PySide6/QtGui.pyd',
     '_internal/PySide6/QtWidgets.pyd', '_internal/PySide6/QtNetwork.pyd',
     '_internal/PySide6/plugins/platforms/qwindows.dll', 'tools/ffmpeg.exe',
-    'tools/ffprobe.exe', 'tools/deno.exe', 'tools/apply_update.ps1',
+    'tools/ffprobe.exe', 'tools/deno.exe', 'tools/yt-dlp.exe', 'tools/apply_update.ps1',
     'licenses/THIRD_PARTY_NOTICES.md', 'LICENSE'}
 
 

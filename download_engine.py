@@ -13,17 +13,19 @@ import urllib.request
 from urllib.parse import parse_qs, urlsplit
 import shutil
 import tempfile
-import inspect
 from copy import deepcopy
 from contextvars import copy_context, ContextVar
 from contextlib import contextmanager
 from queue import Queue, Empty
 
-import yt_dlp
+from ytdlp_process import YtDlpProcess, YtDlpProcessError, require_executable, kill_process_tree
 from media_probe import MediaProbeCache, probe_duration
 from network_limits import NetworkLimits
 from processing_limits import ProcessingLimits, video_encoder, budget_command
 from errors import MediaOperationError
+from cookie_options import cookie_selection, cookie_kwargs
+from network_options import network_selection, network_kwargs
+from naming_templates import NAMING_DEFAULTS, render_naming, ensure_naming_folder, playlist_naming_context
 from utils import (
     DownloadCancelled, InsufficientDiskSpace, PlaylistLinkNotAllowed,
     MAX_FETCH_RETRIES, DISK_HEADROOM_BYTES, NO_WINDOW, psutil,
@@ -34,152 +36,15 @@ from utils import (
 )
 
 
-SUPPORTED_YTDLP_VERSION = "2026.10.26"
 PLAYLIST_BATCH_SIZE = 100
 
 
-class YtDlpCompatibilityError(MediaOperationError):
-    """Installed yt-dlp cannot safely use the managed FFmpeg bridge."""
-
-
-def _ytdlp_compatibility_error(reason):
-    installed = getattr(getattr(yt_dlp, "version", None), "__version__", "unknown")
-    return YtDlpCompatibilityError(
-        f"yt-dlp compatibility error: {reason}. Installed version: {installed}; "
-        f"supported version: {SUPPORTED_YTDLP_VERSION}. "
-        "Run python -m pip install -r requirements.txt in the project Python environment.")
-
-
-def _validate_ffmpeg_postprocessor_api(pp_class):
-    calls = {
-        "real_run_ffmpeg": ((None, [], []), {"expected_retcodes": (0,)}),
-        "_configuration_args": ((None, "ffmpeg", ["_i1", "_i"]), {}),
-        "_ffmpeg_filename_argument": (("output.mp4",), {}),
-        "check_version": ((None,), {}),
-        "try_utime": ((None, "output.mp4", 0, 0), {}),
-    }
-    for name, (args, kwargs) in calls.items():
-        try:
-            method = getattr(pp_class, name)
-            if not callable(method):
-                raise TypeError("method is not callable")
-            inspect.signature(method).bind(*args, **kwargs)
-        except (AttributeError, TypeError, ValueError) as error:
-            raise _ytdlp_compatibility_error(f"{pp_class.__name__}.{name} internal API has changed") from error
-
-
-def validate_ytdlp_compatibility():
-    """Fail before downloading if the tested version or bridge contract changed."""
-    installed = getattr(getattr(yt_dlp, "version", None), "__version__", "")
-    if _normalize_version(installed) != _normalize_version(SUPPORTED_YTDLP_VERSION):
-        raise _ytdlp_compatibility_error("this version has not been validated with the application")
-    try:
-        inspect.signature(yt_dlp.YoutubeDL.run_pp).bind(None, None, {})
-        pp_class = yt_dlp.postprocessor.ffmpeg.FFmpegPostProcessor
-    except (AttributeError, TypeError, ValueError) as error:
-        raise _ytdlp_compatibility_error("The internal YoutubeDL.run_pp or FFmpegPostProcessor API has changed") from error
-    _validate_ffmpeg_postprocessor_api(pp_class)
-
-def _iter_flat_entries(entries):
-    """Release consumed paging caches for the pinned yt-dlp iterator types."""
-    if isinstance(entries, yt_dlp.utils.PagedList):
-        iterator = entries._getslice(0, None)
-        initial = 0
-    else:
-        iterator = iter(entries)
-        initial = (len(entries._cache) if isinstance(entries, yt_dlp.utils.LazyList)
-                   and not entries._reversed else None)
-    try:
-        for index, entry in enumerate(iterator):
-            yield entry
-            if initial is not None and index >= initial:
-                entries._cache.clear()
-    finally:
-        if initial is not None:
-            entries._cache.clear()
-
-
-def _flat_extract(url: str, noplaylist: bool = False, cancel_event=None, *, on_entries=None):
-    """Extract flat metadata and return (info, entries_or_none).
-
-    Consume entries while the yt-dlp context is open. Streaming callers receive
-    bounded batches; legacy callers retain the materialized-list return value.
-    """
-    opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
-    _check_cancelled(cancel_event)
-    opts.update(_network_options(cancel_event))
-    if noplaylist:
-        opts['noplaylist'] = True
-    if on_entries is not None:
-        opts['lazy_playlist'] = True
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        if on_entries is None:
-            info = ydl.extract_info(url, download=False)
-        else:
-            info = ydl.extract_info(url, download=False, process=False)
-            visited = {url}
-            for _ in range(5):
-                if info.get('_type') not in ('url', 'url_transparent'):
-                    break
-                target = info.get('url')
-                if not target or target in visited:
-                    raise MediaOperationError("Playlist resolution contains a redirect loop.")
-                visited.add(target)
-                _check_cancelled(cancel_event)
-                outer = info
-                info = ydl.extract_info(target, download=False, process=False, ie_key=outer.get('ie_key'))
-                if outer.get('_type') == 'url_transparent':
-                    exempt = {'_type', 'url', 'ie_key'}
-                    if not outer.get('section_end') and outer.get('section_start') is None:
-                        exempt |= {'id', 'extractor', 'extractor_key'}
-                    info = {**info, **{key: value for key, value in outer.items()
-                                      if value is not None and key not in exempt}}
-                    if info.get('_type') == 'url':
-                        info['_type'] = 'url_transparent'
-            if info.get('_type') in ('url', 'url_transparent'):
-                raise MediaOperationError("Playlist resolution exceeded the redirect limit.")
-            if info.get('_type', 'video') == 'video' and info.get('entries') is None:
-                info = ydl.process_ie_result(info, download=False)
-        entries = info.get('entries')
-        if on_entries is not None and entries is not None:
-            batch, preview = [], []
-            iterator = _iter_flat_entries(entries)
-            try:
-                while True:
-                    try:
-                        entry = next(iterator)
-                    except StopIteration:
-                        break
-                    except DownloadCancelled:
-                        raise
-                    except Exception:
-                        if batch:
-                            on_entries(batch)
-                            batch = []
-                        raise
-                    _check_cancelled(cancel_event)
-                    if len(preview) < 2:
-                        preview.append(entry)
-                    batch.append(entry)
-                    if len(batch) >= PLAYLIST_BATCH_SIZE:
-                        on_entries(batch)
-                        batch = []
-            finally:
-                iterator.close()
-            if batch:
-                on_entries(batch)
-            info['entries'] = preview
-            entries = preview
-        elif entries:
-            resolved = []
-            for entry in entries:
-                _check_cancelled(cancel_event)
-                resolved.append(entry)
-            entries = resolved
-        else:
-            entries = None
-        _check_cancelled(cancel_event)
-    return info, entries
+def _flat_extract(url: str, noplaylist: bool = False, cancel_event=None, *, on_entries=None, cookie_options=None, network_options=None):
+    options = {'noplaylist': noplaylist, **_network_options(cancel_event)}
+    options.update(cookie_selection(cookie_options))
+    options.update(network_selection(network_options))
+    with YtDlpProcess(options) as ydl:
+        return ydl.flat_extract(url, on_entries=on_entries, batch_size=PLAYLIST_BATCH_SIZE)
 
 
 def _entries_to_urls(entries):
@@ -188,6 +53,10 @@ def _entries_to_urls(entries):
         if not e:
             continue
         candidate = e.get('webpage_url') or e.get('url') or e.get('id')
+        # CLI JSON enriches embedded HTML5 entries with their common page URL.
+        # Queue each media item instead of enqueueing that collection repeatedly.
+        if e.get('url') and e.get('webpage_url') == e.get('playlist_webpage_url'):
+            candidate = e['url']
         if not candidate:
             continue
         if not candidate.startswith('http'):
@@ -202,7 +71,7 @@ def _entries_to_urls(entries):
 
 
 def _extract_urls_from_input(url: str, expand_playlist: bool = True, notes=None, cancel_event=None,
-                             resolved_info=None, on_batch=None):
+                             resolved_info=None, on_batch=None, cookie_options=None, network_options=None, entry_context=None):
     """Resolve video URLs from any platform supported by yt-dlp.
 
     With expand_playlist=True, expand playlists, albums and threads. For a
@@ -239,9 +108,20 @@ def _extract_urls_from_input(url: str, expand_playlist: bool = True, notes=None,
 
     buffered, seen = [], set()
     streamed = 0
+    entry_position = 0
+
+    def capture_context(entries, title=''):
+        nonlocal entry_position
+        if entry_context is None:
+            return
+        for entry in entries or []:
+            entry_position += 1
+            for candidate in _entries_to_urls([entry]):
+                entry_context.setdefault(candidate, playlist_naming_context(entry, entry_position, title))
 
     def consume_entries(entries):
         nonlocal streamed, buffered
+        capture_context(entries)
         urls = _entries_to_urls(entries)
         if urls and not seen and single_video_url:
             urls.insert(0, single_video_url)
@@ -271,7 +151,7 @@ def _extract_urls_from_input(url: str, expand_playlist: bool = True, notes=None,
     try:
         extract_url = single_video_url if not expand_playlist and single_video_url else url
         info, entries = _flat_extract(extract_url, noplaylist=not expand_playlist,
-                                     cancel_event=cancel_event, **stream_options)
+                                     cancel_event=cancel_event, **stream_options, **cookie_kwargs(cookie_options), **network_kwargs(network_options))
     except DownloadCancelled:
         raise
     except Exception as e:
@@ -295,6 +175,8 @@ def _extract_urls_from_input(url: str, expand_playlist: bool = True, notes=None,
             and (info.get('_type') in ('playlist', 'multi_video') or info.get('entries') is not None)):
         return []
     video_urls = _entries_to_urls(entries)
+    if not stream_options:
+        capture_context(entries, (info or {}).get('title', ''))
 
     if not expand_playlist:
         if error is not None:
@@ -317,13 +199,17 @@ def _extract_urls_from_input(url: str, expand_playlist: bool = True, notes=None,
     if len(video_urls) <= 1 and list_id and list_id.startswith(('PL', 'OLAK', 'UU', 'FL', 'LL')):
         # Retry with a playlist-only URL if the watch URL did not expand the list.
         try:
-            _, entries2 = _flat_extract(f"https://www.youtube.com/playlist?list={list_id}",
-                                        cancel_event=cancel_event, **stream_options)
+            alternative_info, entries2 = _flat_extract(f"https://www.youtube.com/playlist?list={list_id}",
+                                        cancel_event=cancel_event, **stream_options, **cookie_kwargs(cookie_options), **network_kwargs(network_options))
             if stream_options and not streamed and entries2 is not None:
                 consume_entries(entries2)
             alt = _entries_to_urls(entries2)
             if len(alt) > len(video_urls):
                 video_urls, error = alt, None
+                if entry_context is not None and not stream_options:
+                    entry_position = 0
+                    entry_context.clear()
+                    capture_context(entries2, (alternative_info or {}).get('title', ''))
         except DownloadCancelled:
             raise
         except Exception as e2:
@@ -375,8 +261,10 @@ def _video_codec_rank(vcodec: str) -> int:
 
 class _MediaInfoCache:
     """Cache metadata for one task attempt and share refreshes between parallel streams."""
-    def __init__(self, url, info):
+    def __init__(self, url, info, cookie_options=None, network_options=None):
         self.url, self.info = url, info
+        self.cookie_options = cookie_selection(cookie_options)
+        self.network_options = network_selection(network_options)
         self.generation = 0
         self.lock = threading.RLock()
 
@@ -408,7 +296,8 @@ class _MediaInfoCache:
             _check_cancelled(stop_event)
             if self.generation == generation:
                 refreshed = fetch_ytinfo_with_retry(
-                    self.url, max_retries=1, cancel_event=cancel_event, stop_event=stop_event)
+                    self.url, max_retries=1, cancel_event=cancel_event, stop_event=stop_event,
+                    **cookie_kwargs(self.cookie_options), **network_kwargs(self.network_options))
                 self.info = refreshed._media_info.info
                 self.generation += 1
 
@@ -420,7 +309,7 @@ def _is_expired_media_error(error):
         if current is None or id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, (yt_dlp.networking.exceptions.HTTPError, urllib.error.HTTPError)):
+        if isinstance(current, (YtDlpProcessError, urllib.error.HTTPError)):
             if getattr(current, 'status', getattr(current, 'code', None)) in (401, 403, 410):
                 return True
         pending.extend((getattr(current, 'cause', None), getattr(current, '__cause__', None),
@@ -468,8 +357,8 @@ class YTFormat:
 
 class YTInfo:
     """Expose yt-dlp video metadata and queries for progressive, video and audio formats."""
-    def __init__(self, url: str, info: dict):
-        self._media_info = _MediaInfoCache(url, info)
+    def __init__(self, url: str, info: dict, cookie_options=None, network_options=None):
+        self._media_info = _MediaInfoCache(url, info, cookie_options, network_options)
         self.url = url
         self.title = info.get('title') or 'Unnamed'
         self.thumbnail_url = info.get('thumbnail')
@@ -502,7 +391,7 @@ class YTInfo:
         return res
 
 
-def fetch_ytinfo_with_retry(url, max_retries=MAX_FETCH_RETRIES, cancel_event=None, *, stop_event=None):
+def fetch_ytinfo_with_retry(url, max_retries=MAX_FETCH_RETRIES, cancel_event=None, *, stop_event=None, cookie_options=None, network_options=None):
     """Fetch video metadata with brief backoff retries for transient failures."""
     last_exc = None
     ydl_opts = {
@@ -511,15 +400,17 @@ def fetch_ytinfo_with_retry(url, max_retries=MAX_FETCH_RETRIES, cancel_event=Non
         'noplaylist': True,
     }
     ydl_opts.update(_network_options(cancel_event, stop_event=stop_event))
+    ydl_opts.update(cookie_selection(cookie_options))
+    ydl_opts.update(network_selection(network_options))
     for attempt in range(1, max_retries + 1):
         _check_cancelled(cancel_event)
         _check_cancelled(stop_event)
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with YtDlpProcess(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             _check_cancelled(cancel_event)
             _check_cancelled(stop_event)
-            return YTInfo(url, info)
+            return YTInfo(url, info, cookie_options, network_options)
         except DownloadCancelled:
             raise
         except Exception as e:
@@ -538,75 +429,10 @@ def fetch_ytinfo_with_retry(url, max_retries=MAX_FETCH_RETRIES, cancel_event=Non
 
 
 
-class ManagedYoutubeDL(yt_dlp.YoutubeDL):
-    """Route yt-dlp FFmpeg postprocessing through the managed task runner."""
-    def __init__(self, opts, ffmpeg_runner, *, request_check=None):
-        validate_ytdlp_compatibility()
-        self._ffmpeg_runner = ffmpeg_runner
-        self._request_check = request_check
-        super().__init__(opts)
-
-    def urlopen(self, request):
-        # Fragment pools may already have queued work when cancellation arrives.
-        # Stop that work before it can open another HTTP request.
-        if self._request_check is not None:
-            self._request_check()
-        return super().urlopen(request)
-
-    def run_pp(self, pp, infodict):
-        if not isinstance(pp, yt_dlp.postprocessor.ffmpeg.FFmpegPostProcessor):
-            return super().run_pp(pp, infodict)
-        _validate_ffmpeg_postprocessor_api(type(pp))
-
-        def managed_ffmpeg(input_path_opts, output_path_opts, *, expected_retcodes=(0,)):
-            # Preserve yt-dlp's postprocessor options when building the managed command.
-            pp.check_version()
-            input_path_opts = list(input_path_opts)
-            output_path_opts = list(output_path_opts)
-            mtimes = [os.stat(path).st_mtime for path, _ in input_path_opts if path]
-            cmd = [pp.executable, "-y"]
-            if pp.basename == "ffmpeg":
-                cmd += ["-loglevel", "repeat+info"]
-            for kind, paths in (("i", input_path_opts), ("o", output_path_opts)):
-                for number, (path, opts) in enumerate(paths, 1):
-                    if not path:
-                        continue
-                    args = list(opts)
-                    keys = [f"_{kind}{number}", f"_{kind}"]
-                    if kind == "o":
-                        args += ["-movflags", "+faststart"]
-                        if number == 1:
-                            keys.append("")
-                    args += pp._configuration_args(pp.basename, keys)
-                    if kind == "i":
-                        args.append("-i")
-                    cmd += [*args, pp._ffmpeg_filename_argument(path)]
-            code = self._ffmpeg_runner(cmd)
-            expected = (expected_retcodes,) if isinstance(expected_retcodes, int) else expected_retcodes
-            if code not in expected:
-                raise yt_dlp.postprocessor.ffmpeg.FFmpegPostProcessorError(
-                    f"FFmpeg process failed ({code})")
-            if mtimes:
-                for path, _ in output_path_opts:
-                    if path:
-                        pp.try_utime(path, min(mtimes), min(mtimes))
-            return ""
-
-        original = pp.__dict__.get("real_run_ffmpeg")
-        pp.real_run_ffmpeg = managed_ffmpeg
-        try:
-            return super().run_pp(pp, infodict)
-        finally:
-            if original is None:
-                del pp.real_run_ffmpeg
-            else:
-                pp.real_run_ffmpeg = original
-
-
 class DownloadEngine:
     """Process downloads and report task state changes through the manager."""
     def __init__(self, manager, *, ffmpeg=None, ffprobe=None):
-        validate_ytdlp_compatibility()
+        require_executable()
         self.manager = manager
         self.ffmpeg = ffmpeg if ffmpeg is not None else which_executable(['ffmpeg', 'ffmpeg.exe'])
         self.ffprobe = ffprobe if ffprobe is not None else which_executable(['ffprobe', 'ffprobe.exe'])
@@ -616,6 +442,9 @@ class DownloadEngine:
         self._force_stopping = False
         self.reserved_output_paths = {}
         self.resource_lock = threading.Lock()
+        self._subtitle_context = {}
+        self._output_naming = {}
+        self._rate_divisor = ContextVar(f"download_rate_divisor_{id(self)}", default=1)
         self._encoder_lock = threading.Lock()
         self._encoders = None
         self.processing_limits = ProcessingLimits()
@@ -654,7 +483,43 @@ class DownloadEngine:
     def configure_network(self, fragment_downloads, network_connections):
         self.network_limits.configure(fragment_downloads, network_connections)
 
+    def ytdlp_process(self, options, tid, *, stop_event=None, folder=None):
+        paused_status = None
+        def check():
+            _check_cancelled(stop_event)
+            if self.manager.is_cancelled(tid):
+                raise DownloadCancelled()
+
+        def tick():
+            nonlocal paused_status
+            task = self.manager.get_task(tid) or {}
+            if self.manager.paused and paused_status is None:
+                paused_status = task.get('status', 'Downloading')
+                self.manager.update_task(tid, status='Paused')
+            elif not self.manager.paused and paused_status is not None:
+                if task.get('status') == 'Paused':
+                    self.manager.update_task(tid, status=paused_status)
+                paused_status = None
+            if folder:
+                self._check_disk_space(folder, 0)
+
+        options = dict(options)
+        task = self.manager.get_task(tid)
+        options.update(cookie_selection(task))
+        options.update(network_selection(task))
+        if options['download_rate']:
+            options['download_rate'] = str(max(1, int(options['download_rate']) // self._rate_divisor.get()))
+            options['concurrent_fragment_downloads'] = 1
+        options['ffmpeg_threads'] = self.processing_limits.thread_budget()
+        if self.ffmpeg:
+            options.setdefault('ffmpeg_location', self.ffmpeg)
+        return YtDlpProcess(options, check=check, is_paused=lambda: self.manager.paused,
+                            on_start=self._register_process, on_finish=self._unregister_process,
+                            on_tick=tick)
+
     def media_download_session(self, tid, *, streams=1, fragmented=True, stop_event=None):
+        if (self.manager.get_task(tid) or {}).get('download_rate'):
+            fragmented = False
         return self.network_limits.session(
             lambda: self._wait_for_download_resume(tid, stop_event=stop_event),
             lambda: self.manager.update_task(tid, status="Waiting for download connection slot"),
@@ -725,14 +590,22 @@ class DownloadEngine:
             folder = work_dir
 
             resolved = self.manager.take_resolved_info(tid)
-            yt = (YTInfo(url, resolved) if resolved is not None else
-                  fetch_ytinfo_with_retry(url, cancel_event=self.manager.task_control(tid)[0]))
+            yt = (YTInfo(url, resolved, cookie_selection(task), network_selection(task)) if resolved is not None else
+                  fetch_ytinfo_with_retry(url, cancel_event=self.manager.task_control(tid)[0], **cookie_kwargs(task), **network_kwargs(task)))
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
 
             self.manager.update_metadata(tid, duration=getattr(yt, 'duration', 0) or 0)
             raw_title = yt.title or "Unnamed"
+            if (task.get('subtitle_mode', 'none') != 'none' or task.get('embed_cover', 'off') == 'on'
+                    or task.get('chapter_mode', 'none') != 'none'):
+                with self.resource_lock:
+                    self._subtitle_context[tid] = {'metadata': yt._media_info, 'start': 0}
             title_safe = safe_filename(raw_title)
+            if any(task.get(key, default) != default for key, default in NAMING_DEFAULTS.items()):
+                folders, stem = render_naming(task, yt._media_info.info)
+                with self.resource_lock:
+                    self._output_naming[tid] = (folders, stem)
             self.manager.update_task(tid, title=raw_title)
             # Let the UI load the thumbnail asynchronously without blocking the download.
             self.manager.emit("thumbnail", tid, url=getattr(yt, 'thumbnail_url', None))
@@ -744,6 +617,24 @@ class DownloadEngine:
             if mode in ("video", "audio"):
                 from media_processing import ConfiguredOutput
                 final_path = ConfiguredOutput(self).process(tid, worker_id, url, yt, task, folder, title_safe)
+                from chapter_options import ChapterBatch
+                if isinstance(final_path, ChapterBatch):
+                    from chapter_processing import publish_chapter_folder
+                    batch = final_path
+                    stage = tempfile.mkdtemp(prefix='.chapter-output-', dir=folder)
+                    for part in batch.parts:
+                        self._record_subtitle_start(tid, part.start)
+                        self._publish_output(tid, part.path, stage, apply_naming=False)
+                    with self.resource_lock:
+                        naming = self._output_naming.get(tid)
+                    parent = ensure_naming_folder(output_folder, naming[0]) if naming else output_folder
+                    final_path = publish_chapter_folder(self, tid, stage, parent, batch.directory_name)
+                    output_paths.append(final_path)
+                    output_complete = True
+                    label = f'{len(batch.parts)} {batch.group_label}'
+                    self.manager.update_task(tid, status=f'Completed ({label})', progress=100, output_path=final_path)
+                    self.manager.notify(f'{raw_title} downloaded ({label}).')
+                    return
                 final_path = self._publish_output(tid, final_path, output_folder)
                 output_paths.append(final_path)
                 output_complete = True
@@ -1064,6 +955,8 @@ class DownloadEngine:
                 if work_dir is not None:
                     self._cleanup_workspace(work_dir, output_folder)
             with self.resource_lock:
+                self._subtitle_context.pop(tid, None)
+                self._output_naming.pop(tid, None)
                 for key, owner in list(self.reserved_output_paths.items()):
                     if owner == tid:
                         del self.reserved_output_paths[key]
@@ -1090,6 +983,8 @@ class DownloadEngine:
             self._wait_for_download_resume(tid, stop_event=stop_event)
         info, generation = media_info.snapshot(format_id) if media_info else (None, None)
         if info is None:
+            if tid is not None and self.manager.get_task(tid).get('source_selection', 'auto') == 'manual':
+                raise MediaOperationError('The selected source format is unavailable. Inspect the source formats again.')
             if format_id is None:
                 return ydl.extract_info(source_url, download=True)
             return ydl.download([source_url])
@@ -1130,7 +1025,7 @@ class DownloadEngine:
                 raise DownloadCancelled()
 
         def hook(d):
-            self._wait_for_download_resume(tid, stop_event=stop_event)
+            check_cancelled()
             if d.get('status') in ('downloading', 'finished'):
                 finished = d.get('status') == 'finished'
                 downloaded = d.get('downloaded_bytes') or 0
@@ -1148,6 +1043,10 @@ class DownloadEngine:
             'fragment_retries': 5,
             'noprogress': True,
         }
+        if self.manager.get_task(tid).get('source_selection', 'auto') == 'manual':
+            # "all" keeps formats with unknown codecs too; the exact-ID filter
+            # and the one-format metadata snapshot still select a single source.
+            ydl_opts['format'] = f'all[format_id="{yt_format.format_id}"]'
         failed = None
         try:
             cancel_event, worker_id = self.manager.task_control(tid)
@@ -1160,10 +1059,7 @@ class DownloadEngine:
             fragmented = not protocol or any(kind in protocol for kind in ('m3u8', 'dash_segments', 'ism'))
             with self.media_download_session(tid, fragmented=fragmented, stop_event=stop_event) as network:
                 ydl_opts.update(network)
-                with ManagedYoutubeDL(ydl_opts, lambda cmd: self._run_ffmpeg(
-                        tid, worker_id, cmd, duration=self._task_duration(tid),
-                        status_label="Processing (yt-dlp)", check=False, stop_event=stop_event),
-                        request_check=lambda: self._wait_for_download_resume(tid, stop_event=stop_event)) as ydl:
+                with self.ytdlp_process(ydl_opts, tid, stop_event=stop_event, folder=folder) as ydl:
                     self._download_from_info(ydl, source_url, getattr(yt_format, '_media_info', None),
                                              cancel_event, format_id=yt_format.format_id, stop_event=stop_event, tid=tid)
             check_cancelled()
@@ -1202,6 +1098,7 @@ class DownloadEngine:
         }
 
         def _dl(key, stream, filename):
+            token = self._rate_divisor.set(2)
             try:
                 path = self._download_format(tid, key, source_url, stream, filename,
                                              folder=folder, stop_event=stop_event)
@@ -1213,6 +1110,9 @@ class DownloadEngine:
                     # DownloadCancelled in response to this signal.
                     errors.append(e)
                     stop_event.set()
+
+            finally:
+                self._rate_divisor.reset(token)
 
         t_video = threading.Thread(target=copy_context().run,
                                    args=(_dl, "video", video_stream, video_filename), daemon=True)
@@ -1342,6 +1242,8 @@ class DownloadEngine:
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
             self._replace_media(trimmed_path, input_path)
+            if (self.manager.get_task(tid) or {}).get('subtitle_mode', 'none') != 'none':
+                self._record_subtitle_start(tid, start_s or 0)
         except (DownloadCancelled, InsufficientDiskSpace):
             raise  # Propagate cancellation and disk exhaustion instead of reporting success.
         except Exception as e:
@@ -1377,7 +1279,7 @@ class DownloadEngine:
     def _read_media_probe(self, path, executable):
         out = run_cmd_capture([
             executable, "-v", "error", "-show_entries",
-            "format=format_name,duration,start_time:format_tags=major_brand:stream=index,codec_type,codec_name,sample_rate,channels,sample_fmt,bits_per_sample,bits_per_raw_sample",
+            "format=format_name,duration,start_time:format_tags=major_brand:stream=index,codec_type,codec_name,sample_rate,channels,sample_fmt,bits_per_sample,bits_per_raw_sample,width,height:stream_disposition=attached_pic:stream_tags=filename,mimetype:chapter=id,start_time,end_time:chapter_tags=title",
             "-of", "json", path,
         ], timeout=15, on_start=self._register_process, on_finish=self._unregister_process)
         info = json.loads(out)
@@ -1519,7 +1421,8 @@ class DownloadEngine:
                 fmt_sel = f"bv*{h}+ba/b{h}"
 
         def hook(d):
-            self._wait_for_download_resume(tid)
+            if self.manager.is_cancelled(tid):
+                raise DownloadCancelled()
             if d.get('status') in ('downloading', 'finished'):
                 finished = d.get('status') == 'finished'
                 key = (d.get('info_dict') or {}).get('format_id') or d.get('filename') or 'sel'
@@ -1567,10 +1470,7 @@ class DownloadEngine:
             self._wait_for_download_resume(tid)
             with self.media_download_session(tid, streams=1 if audio_only else 2) as network:
                 ydl_opts.update(network)
-                with ManagedYoutubeDL(ydl_opts, lambda cmd: self._run_ffmpeg(
-                        tid, worker_id, cmd, duration=self._task_duration(tid),
-                        status_label="Merging (yt-dlp)", check=False),
-                        request_check=lambda: self._wait_for_download_resume(tid)) as ydl:
+                with self.ytdlp_process(ydl_opts, tid, folder=folder) as ydl:
                     info = self._download_from_info(ydl, url, media_info, cancel_event, tid=tid)
             if (info or {}).get("duration"):
                 self.manager.update_metadata(tid, duration=info["duration"])
@@ -1661,13 +1561,48 @@ class DownloadEngine:
             if self.reserved_output_paths.get(key) == tid:
                 del self.reserved_output_paths[key]
 
-    def _publish_output(self, tid, source, output_folder):
+    def _record_subtitle_start(self, tid, start):
+        with self.resource_lock:
+            self._subtitle_context.setdefault(tid, {})['start'] = max(0, start or 0)
+
+    def _publish_output(self, tid, source, output_folder, *, apply_naming=True):
+        task = self.manager.get_task(tid) or {}
+        with self.resource_lock:
+            naming = self._output_naming.get(tid)
+            state = dict(self._subtitle_context.get(tid, {}))
+        def finalize_media():
+            if task.get('chapter_mode', 'none') == 'embed':
+                from chapter_processing import ChapterProcessor
+                ChapterProcessor(self).embed(tid, source, state.get('metadata'), state.get('start', 0))
+            if task.get('embed_cover', 'off') == 'on':
+                from cover_processing import CoverProcessor
+                CoverProcessor(self).prepare(tid, source, state.get('metadata'))
+        filename_options = {}
+        bundle_options = {}
+        if naming and apply_naming:
+            folders, stem = naming
+            output_folder = ensure_naming_folder(output_folder, folders)
+            filename_options['filename'] = stem + os.path.splitext(source)[1]
+            bundle_options['stem'] = stem
+        if task.get('subtitle_mode', 'none') == 'none':
+            finalize_media()
+            return self._publish_media_file(tid, source, output_folder, **filename_options)
+        from subtitle_processing import SubtitleProcessor, publish_bundle
+        with self.resource_lock:
+            state = dict(self._subtitle_context.get(tid, {}))
+        with SubtitleProcessor(self).prepare(tid, source, state.get('metadata'), state.get('start', 0)) as sidecars:
+            finalize_media()
+            if sidecars:
+                return publish_bundle(self, tid, source, output_folder, sidecars, **bundle_options)
+            return self._publish_media_file(tid, source, output_folder, **filename_options)
+
+    def _publish_media_file(self, tid, source, output_folder, *, filename=None):
         """Publish a completed output without overwriting any existing destination."""
         if self.manager.is_cancelled(tid):
             raise DownloadCancelled()
         self.manager.report_stage_progress(tid, "publishing", status="Kaydediliyor")
         source_size = os.path.getsize(source)
-        desired = os.path.join(output_folder, os.path.basename(source))
+        desired = os.path.join(output_folder, filename or os.path.basename(source))
         while True:
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
@@ -1829,8 +1764,8 @@ class DownloadEngine:
             processes = list(self.managed_processes)
         for proc in processes:
             try:
-                if proc.poll() is None:
-                    proc.kill()  # Also terminates a suspended FFmpeg process.
+                if proc.poll() is None or getattr(proc, '_owned_process_tree', None) is not None:
+                    kill_process_tree(proc)
             except OSError as error:
                 log_warning("Could not terminate the managed subprocess", error, [("pid", proc.pid)])
 

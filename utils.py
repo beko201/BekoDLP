@@ -24,11 +24,6 @@ from settings import DEFAULTS as _SETTINGS_DEFAULTS
 from errors import MediaOperationError
 
 try:
-    import yt_dlp
-except ImportError as error:
-    raise ImportError("yt-dlp required: pip install yt-dlp") from error
-
-try:
     import psutil
 except ImportError as error:
     raise ImportError("psutil required: pip install psutil") from error
@@ -104,7 +99,7 @@ def configure_logging(max_bytes, backup_count, *, repeat_seconds=None):
 def _log_text(value):
     text = _ANSI_RE.sub('', str(value))
     # Redact signed URL parameters, credentials and HTTP headers from shareable logs.
-    text = re.sub(r'(https?://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text, flags=re.I)
+    text = re.sub(r'((?:https?|socks4a?|socks5h?)://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text, flags=re.I)
     text = re.sub(r'([?&](?:token|access_token|refresh_token|key|api_key|signature|sig|lsig|password|auth|authorization|cookie|policy|credential|x-amz-signature|x-amz-credential)=)[^\s&#\'"<>]+',
                   r'\1[REDACTED]', text, flags=re.I)
     text = re.sub(r'(?im)\b(authorization|proxy-authorization|cookie|set-cookie)(\s*[:=]\s*)[^\r\n]+',
@@ -197,8 +192,8 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 
 def env_info() -> str:
     """Return runtime environment details for log records."""
-    ver = getattr(getattr(yt_dlp, 'version', None), '__version__', None)
-    ver = ver or getattr(yt_dlp, '__version__', '?')
+    from ytdlp_process import executable_version
+    ver = executable_version()
     return f"yt-dlp {ver} | Python {platform.python_version()} | {sys.platform}"
 
 
@@ -208,9 +203,6 @@ def unexpected_traceback(error=None):
     if exc is None:
         return None
     expected = (MediaOperationError,)
-    ytdlp_error = getattr(getattr(yt_dlp, 'utils', None), 'YoutubeDLError', None)
-    if isinstance(ytdlp_error, type):
-        expected += (ytdlp_error,)
     if not isinstance(exc, BaseException) or isinstance(exc, expected):
         return None
     return ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -496,21 +488,18 @@ class _YtDlpLogger:
 
 def portable_deno_path():
     """Return the app-local runtime when installed, independent of the working directory."""
-    from app_paths import tools_root
+    from app_paths import tools_root, managed_tool_path
+    updated = managed_tool_path('deno')
+    if updated:
+        return updated
     deno = str(tools_root() / ('deno.exe' if os.name == 'nt' else 'deno'))
     return deno if os.path.isfile(deno) else None
 
 
 def _network_options(cancel_event, *, stop_event=None):
-    def retry_delay(attempt):
-        _check_cancelled(cancel_event)
-        _check_cancelled(stop_event)
-        return 0
-
     options = {'socket_timeout': 5, 'extractor_retries': 1,
-            'logger': _YtDlpLogger(), 'no_warnings': False,
-            'retry_sleep_functions': {kind: retry_delay for kind in
-                                      ('http', 'fragment', 'file_access', 'extractor')}}
+            'cancel_check': lambda: (_check_cancelled(cancel_event), _check_cancelled(stop_event)),
+            'logger': _YtDlpLogger()}
     # Resolve relative to the application, not the IDE's working directory.
     # With no portable runtime installed, yt-dlp retains its normal PATH lookup.
     deno = portable_deno_path()
@@ -568,6 +557,15 @@ def safe_filename(s: str) -> str:
 
 def which_executable(names):
     for name in names:
+        from app_paths import managed_tool_path
+        updated = managed_tool_path(name.removesuffix('.exe'))
+        if updated:
+            return updated
+        if name in ('yt-dlp', 'yt-dlp.exe'):
+            from app_paths import tools_root
+            portable = tools_root() / ('yt-dlp.exe' if os.name == 'nt' else 'yt-dlp')
+            if portable.is_file():
+                return str(portable)
         if os.name == 'nt' and name in ('ffmpeg', 'ffmpeg.exe', 'ffprobe', 'ffprobe.exe'):
             # Use the verified app-local version before an older system install.
             from app_paths import tools_root
