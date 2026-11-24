@@ -12,17 +12,22 @@ from http.cookiejar import MozillaCookieJar, LoadError
 from pathlib import Path
 from queue import Queue, Empty, Full
 import re
+import shlex
 import subprocess
 import tempfile
 import threading
 import time
 import warnings
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from errors import MediaOperationError
 from utils import NO_WINDOW, DownloadCancelled, psutil, which_executable
 from cookie_options import validate_cookie_options
 from network_options import validate_network_options
 from process_tree import spawn_owned_process
+from ytdlp_output import (BoundedLines, JsonBudget, OutputLimitError, OUTPUT_CHUNK_BYTES,
+                          OUTPUT_QUEUE_CHUNKS, MAX_PLAYLIST_JSON_BYTES, MAX_PLAYLIST_DOCUMENTS,
+                          MAX_COLLECTED_PLAYLIST_JSON_BYTES)
 
 _COOKIE_PARSE_LOCK = threading.Lock()
 
@@ -33,6 +38,13 @@ class YtDlpProcessError(MediaOperationError):
         self.returncode = returncode
         match = re.search(r'HTTP Error (401|403|410)\b', message)
         self.status = int(match[1]) if match else None
+
+
+def _read_json(budget, payload, *, object_only=True):
+    try:
+        return budget.read(payload, object_only=object_only)
+    except OutputLimitError as error:
+        raise YtDlpProcessError(str(error)) from None
 
 
 def executable_path():
@@ -114,7 +126,11 @@ class YtDlpProcess:
         args = [self.executable or require_executable(), '--ignore-config', '--no-plugin-dirs',
                 '--no-colors', '--encoding', 'utf-8', '--no-cache-dir']
         selected = validate_network_options(self.options)
-        if selected['proxy_mode'] != 'system':
+        if selected['proxy_mode'] == 'custom' and '@' in selected['proxy_url']:
+            # Explicit config on stdin is still read with --ignore-config.
+            # Never expose credentials in the child process command line.
+            args += ['--config-locations', '-']
+        elif selected['proxy_mode'] != 'system':
             args += ['--proxy', selected['proxy_url'] if selected['proxy_mode'] == 'custom' else '']
         if selected['download_rate']:
             args += ['--limit-rate', selected['download_rate']]
@@ -197,28 +213,65 @@ class YtDlpProcess:
 
     def _run_process(self, args, consume):
         self._wait_before_start()
+        selected = validate_network_options(self.options)
+        proxy_config = None
+        if selected['proxy_mode'] == 'custom' and '@' in selected['proxy_url']:
+            # yt-dlp config uses POSIX shlex even on Windows. Quote the whole
+            # URL so quotes, backslashes and # cannot inject config options.
+            # Frozen yt-dlp can ignore PYTHONIOENCODING for stdin. Transfer
+            # non-ASCII credentials as URL escapes, preserving existing escapes.
+            url = urlsplit(selected['proxy_url'])
+            user, separator, password = url.netloc.rpartition('@')[0].partition(':')
+            auth = quote(user, safe='%')
+            if separator:
+                auth += ':' + quote(password, safe='%')
+            host = url.hostname
+            host = f'[{host}]' if ':' in host else host.encode('idna').decode('ascii')
+            proxy_url = urlunsplit((url.scheme, f'{auth}@{host}:{url.port}', url.path, '', ''))
+            proxy_config = '--proxy ' + shlex.quote(proxy_url) + '\n'
         env = None
         if self.options.get('proxy_mode') == 'direct':
             env = {key: value for key, value in os.environ.items()
                    if key.lower() not in ('http_proxy', 'https_proxy', 'all_proxy')}
         proc = spawn_owned_process(args, stdout=subprocess.PIPE, env=env,
                                 stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace',
-                                bufsize=1, **dict(NO_WINDOW, stdin=subprocess.DEVNULL))
-        lines, stopped, tail = Queue(maxsize=128), threading.Event(), deque(maxlen=12)
+                                bufsize=1, **dict(NO_WINDOW, stdin=subprocess.PIPE if proxy_config is not None else subprocess.DEVNULL))
+        lines, stopped, tail = Queue(maxsize=OUTPUT_QUEUE_CHUNKS), threading.Event(), deque(maxlen=12)
+        output = BoundedLines()
+        read_failed = threading.Event()
+        input_failed = threading.Event()
+        writer = None
+
+        def write_config():
+            try:
+                proc.stdin.write(proxy_config)
+                proc.stdin.close()
+            except (OSError, ValueError):
+                # Do not include config contents or a plaintext fallback in errors.
+                input_failed.set()
+                try:
+                    proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
         suspended, descendants = {}, {}
         parent = None
 
         def reader():
             try:
-                for line in proc.stdout:
+                while not stopped.is_set():
+                    chunk = proc.stdout.buffer.read1(OUTPUT_CHUNK_BYTES)
+                    if not chunk:
+                        break
                     while not stopped.is_set():
                         try:
-                            lines.put(line.rstrip('\r\n'), timeout=.05)
+                            lines.put(chunk, timeout=.05)
                             break
                         except Full:
                             continue
                     if stopped.is_set():
                         break
+            except (OSError, ValueError):
+                read_failed.set()
             finally:
                 while not stopped.is_set():
                     try:
@@ -238,7 +291,16 @@ class YtDlpProcess:
                 self.on_start(proc)
             thread.start()
             started = True
+            if proxy_config is not None:
+                # A child that stalls before reading stdin must remain cancellable.
+                writer = threading.Thread(target=write_config, daemon=True, name='yt-dlp-config')
+                writer.start()
             last_tick, eof, parent_exited = 0, False, False
+            def consume_output(line):
+                if not consume(line):
+                    tail.append(line[-2048:])
+                    if line.startswith('WARNING:') and self.options.get('logger'):
+                        self.options['logger'].warning(line)
             while True:
                 self.check()
                 if proc.poll() is not None and not parent_exited:
@@ -284,16 +346,25 @@ class YtDlpProcess:
                 except Empty:
                     continue
                 if line is None:
+                    if read_failed.is_set():
+                        raise YtDlpProcessError('The yt-dlp output pipe could not be read.')
+                    for final_line in output.finish():
+                        consume_output(final_line)
                     eof = True
                     continue
-                if not consume(line):
-                    tail.append(line[-2048:])
-                    if line.startswith('WARNING:') and self.options.get('logger'):
-                        self.options['logger'].warning(line)
+                for decoded_line in output.feed(line):
+                    self.check()
+                    consume_output(decoded_line)
             code = proc.wait()
+            if writer is not None:
+                writer.join(timeout=3)
             self.check()
             if code:
                 raise YtDlpProcessError('yt-dlp failed: ' + '\n'.join(tail), code)
+            if input_failed.is_set():
+                raise YtDlpProcessError('The proxy configuration could not be delivered to yt-dlp.')
+        except OutputLimitError as error:
+            raise YtDlpProcessError(str(error)) from None
         finally:
             stopped.set()
             try:
@@ -302,6 +373,13 @@ class YtDlpProcess:
                 # Closing the Windows job is a second kernel-enforced cleanup
                 # path and must precede joining/closing the output reader.
                 proc._owned_process_tree.close()
+                if writer is not None:
+                    writer.join(timeout=3)
+                if proc.stdin is not None and (writer is None or not writer.is_alive()):
+                    try:
+                        proc.stdin.close()
+                    except (OSError, ValueError):
+                        pass
                 if started:
                     thread.join(timeout=3)
                 proc.stdout.close()
@@ -317,15 +395,11 @@ class YtDlpProcess:
 
     def _metadata(self, args):
         result = []
+        budget = JsonBudget()
         def consume(line):
             if not line.startswith('{'):
                 return False
-            try:
-                info = json.loads(line)
-            except ValueError as error:
-                raise YtDlpProcessError('yt-dlp returned invalid metadata JSON') from error
-            if not isinstance(info, dict):
-                raise YtDlpProcessError('yt-dlp returned an invalid metadata document')
+            info = _read_json(budget, line)
             result.append(info)
             return True
         self._run([*self._arguments(), '--dump-single-json', '--simulate', *args], consume)
@@ -379,11 +453,12 @@ class YtDlpProcess:
     def download_subtitles(self, info, output_template, languages, *, automatic=False):
         """Fetch text tracks only through the documented CLI; never download media again."""
         results = []
+        budget = JsonBudget()
         def consume(line):
             if not line.startswith('BEKO_SUBTITLES:'):
                 return False
             payload = line.partition(':')[2]
-            value = {} if payload in ('NA', 'null') else json.loads(payload)
+            value = _read_json(budget, '{}' if payload in ('NA', 'null') else payload)
             results.append(value or {})
             return True
         with self._info_file(info) as path:
@@ -399,6 +474,7 @@ class YtDlpProcess:
 
     def _download(self, source):
         result = []
+        result_budget = JsonBudget()
         # JSON conversions escape filenames and metadata; ordinary console text is never parsed.
         progress = ('BEKO_PROGRESS:%(progress.{status,downloaded_bytes,total_bytes,total_bytes_estimate,filename})j'
                     '\t%(info.format_id)j')
@@ -412,8 +488,8 @@ class YtDlpProcess:
         def consume(line):
             if line.startswith('BEKO_PROGRESS:'):
                 payload, _, format_id = line.partition(':')[2].rpartition('\t')
-                data = json.loads(payload)
-                data['info_dict'] = {'format_id': json.loads(format_id)}
+                data = _read_json(JsonBudget(), payload)
+                data['info_dict'] = {'format_id': _read_json(JsonBudget(), format_id, object_only=False)}
                 for key in ('downloaded_bytes', 'total_bytes', 'total_bytes_estimate'):
                     if not isinstance(data.get(key), (int, float)):
                         data[key] = 0
@@ -427,7 +503,7 @@ class YtDlpProcess:
             if line.startswith('BEKO_START:'):
                 return True
             if line.startswith('BEKO_RESULT:'):
-                result.append(json.loads(line.partition(':')[2]))
+                result.append(_read_json(result_budget, line.partition(':')[2]))
                 return True
             return False
         self._run(args, consume)
@@ -438,6 +514,8 @@ class YtDlpProcess:
     def flat_extract(self, url, *, on_entries=None, batch_size=100):
         """Stream flat playlist entries without retaining yt-dlp's paging caches."""
         preview, batch, collected, standalone = [], [], [], []
+        budget = JsonBudget(max_documents=MAX_PLAYLIST_DOCUMENTS,
+                            max_bytes=MAX_PLAYLIST_JSON_BYTES if on_entries else MAX_COLLECTED_PLAYLIST_JSON_BYTES)
         playlist = None
 
         def flush():
@@ -450,7 +528,7 @@ class YtDlpProcess:
             nonlocal playlist
             if not line.startswith('{'):
                 return False
-            entry = json.loads(line)
+            entry = _read_json(budget, line)
             if entry.get('playlist_id') is not None or entry.get('playlist') is not None:
                 if playlist is None:
                     playlist = {'_type': 'playlist', 'id': entry.get('playlist_id'),
@@ -465,6 +543,8 @@ class YtDlpProcess:
                 else:
                     collected.append(entry)
             else:
+                if standalone:
+                    raise YtDlpProcessError('yt-dlp returned ambiguous video metadata')
                 standalone.append(entry)
             return True
         try:

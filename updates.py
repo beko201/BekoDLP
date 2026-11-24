@@ -14,7 +14,7 @@ import secrets
 import zipfile
 from urllib.parse import quote, urlsplit
 
-from app_info import APP_EXECUTABLE, UPDATE_ASSET_NAME, UPDATE_REPOSITORY
+from app_info import APP_EXECUTABLE, APP_VERSION, UPDATE_ASSET_NAME, UPDATE_REPOSITORY
 from package_layout import MANIFEST_NAME, parse_manifest, extract_package, file_sha256
 from utils import log_warning
 
@@ -25,7 +25,7 @@ MAX_UPDATE_BYTES = 1024 * 1024 * 1024
 def version_key(value):
     """Accept stable numeric release tags, treating 1.0 and v1.0.0 equally."""
     if not isinstance(value, str) or not re.fullmatch(r'v?\d{1,6}(?:\.\d{1,6}){0,3}', value):
-        raise ValueError('Use a stable version tag such as v1.1 or v1.1.0.')
+        raise ValueError(f'Use a stable version tag such as v{APP_VERSION}.')
     parts = tuple(int(part) for part in value.removeprefix('v').split('.'))
     return parts + (0,) * (4 - len(parts))
 
@@ -183,5 +183,8 @@ def launch_update(stage):
     return subprocess.Popen([str(powershell), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                              '-File', str(script), '-Config', str(config)],
                             cwd=str(stage.folder.parent), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                            # Windows PowerShell can exit without running -File when
+                            # DETACHED_PROCESS is set. CREATE_NO_WINDOW hides the
+                            # helper and it still survives the application's exit.
+                            creationflags=subprocess.CREATE_NO_WINDOW,
                             stdin=subprocess.DEVNULL)

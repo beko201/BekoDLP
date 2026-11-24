@@ -10,6 +10,7 @@ from copy import deepcopy
 from cookie_options import COOKIE_DEFAULTS, COOKIE_BROWSERS, validate_cookie_options
 from subtitle_options import SUBTITLE_DEFAULTS, SUBTITLE_MODES, validate_subtitle_options
 from network_options import NETWORK_DEFAULTS, validate_network_options
+from proxy_secrets import SecretProtectionError, protect_document, unprotect_document, has_plaintext_proxy
 from naming_templates import NAMING_DEFAULTS, validate_naming_options
 from cover_options import COVER_DEFAULTS
 from chapter_options import CHAPTER_DEFAULTS
@@ -172,25 +173,37 @@ def _finite_float(value):
     return number
 
 
-def _read_document(path):
+def _read_document(path, *, raw=False):
     with open(path, 'rb') as stream:
         content = stream.read(MAX_SETTINGS_BYTES + 1)
     if len(content) > MAX_SETTINGS_BYTES:
         raise SettingsFileTooLarge('The settings file exceeds the 1 MiB limit.')
     try:
-        return json.loads(content.decode('utf-8-sig'), object_pairs_hook=_unique_object,
-                          parse_constant=_reject_constant, parse_float=_finite_float)
+        document = json.loads(content.decode('utf-8-sig'), object_pairs_hook=_unique_object,
+                              parse_constant=_reject_constant, parse_float=_finite_float)
+        return document if raw else unprotect_document(document)
     except RecursionError as error:
         raise ValueError('The settings file has excessive JSON nesting.') from error
 
 
-def _read(path):
-    return validate_settings(_read_document(path))
+def _read(path, *, migrate=False):
+    original = _read_document(path, raw=True)
+    try:
+        document = unprotect_document(original)
+        plaintext = has_plaintext_proxy(original)
+    except RecursionError as error:
+        raise ValueError('The settings data has excessive nesting.') from error
+    result = validate_settings(document)
+    if migrate and plaintext:
+        _atomic_write(path, document)
+    return result
 
 
 def _serialize(data):
     try:
-        content = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+        content = json.dumps(protect_document(data), ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+    except SecretProtectionError:
+        raise
     except (TypeError, ValueError, RecursionError) as error:
         raise ValueError('Settings must contain finite, serializable JSON values.') from error
     if len(content.encode('utf-8')) > MAX_SETTINGS_BYTES:
@@ -220,24 +233,33 @@ class SettingsStore:
         self.data = dict(DEFAULTS)
         self.writable = True
 
+    def _protect_backup(self):
+        try:
+            _read(self.backup, migrate=True)
+        except SecretProtectionError:
+            raise
+        except (FileNotFoundError, ValueError):
+            pass  # Invalid/future backups are preserved, not rewritten.
+
     def load(self):
         """Return preferences and user-facing recovery or validation warnings."""
         self.data = deepcopy(DEFAULTS)
         self.writable = True
         try:
-            self.data, issues = _read(self.path)
+            self._protect_backup()
+            self.data, issues = _read(self.path, migrate=True)
         except FileNotFoundError:
             if not self.backup.exists():
                 return deepcopy(self.data), []
             try:
-                self.data, issues = _read(self.backup)
+                self.data, issues = _read(self.backup, migrate=True)
             except (OSError, ValueError):
                 self.writable = False
                 raise
             return deepcopy(self.data), ["The primary settings file is missing; the backup was loaded.", *issues]
         except (OSError, ValueError) as error:
             # Preserve files with unsupported schemas or read errors.
-            if isinstance(error, (OSError, UnsupportedSettingsVersion, SettingsFileTooLarge)):
+            if isinstance(error, (OSError, UnsupportedSettingsVersion, SettingsFileTooLarge, SecretProtectionError)):
                 self.writable = False
                 raise
             preserved = Path(str(self.path) + f".corrupt-{time.time_ns()}")
@@ -247,7 +269,7 @@ class SettingsStore:
                 self.writable = False
                 raise
             try:
-                self.data, issues = _read(self.backup)
+                self.data, issues = _read(self.backup, migrate=True)
             except FileNotFoundError:
                 issues = []
             except (OSError, ValueError):
@@ -264,11 +286,12 @@ class SettingsStore:
         if issues:
             raise ValueError("Invalid preferences: " + ", ".join(issues))
         try:
-            previous_original = _read_document(self.path)
+            previous_raw = _read_document(self.path, raw=True)
+            previous_original = unprotect_document(previous_raw)
             previous, previous_issues = validate_settings(previous_original)
         except FileNotFoundError:
             previous = None
-        except (UnsupportedSettingsVersion, SettingsFileTooLarge):
+        except (UnsupportedSettingsVersion, SettingsFileTooLarge, SecretProtectionError):
             self.writable = False
             raise
         except ValueError:
@@ -280,10 +303,11 @@ class SettingsStore:
             data, issues = validate_settings({**previous, **changes})
             if issues:
                 raise ValueError('Invalid preferences: ' + ', '.join(issues))
-            if previous_original == data and not previous_issues:
+            if previous_original == data and not previous_issues and not has_plaintext_proxy(previous_raw):
                 self.data = data
                 return False
             _serialize(data)  # Reject unsafe updates before replacing either runtime file.
+            self._protect_backup()
             if not previous_issues:
                 _atomic_write(self.backup, previous)
         _atomic_write(self.path, data)

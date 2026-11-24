@@ -99,7 +99,7 @@ def configure_logging(max_bytes, backup_count, *, repeat_seconds=None):
 def _log_text(value):
     text = _ANSI_RE.sub('', str(value))
     # Redact signed URL parameters, credentials and HTTP headers from shareable logs.
-    text = re.sub(r'((?:https?|socks4a?|socks5h?)://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text, flags=re.I)
+    text = re.sub(r'''((?:https?|socks4a?|socks5h?)://)[^\s/'"<>]*@''', r'\1[REDACTED]@', text, flags=re.I)
     text = re.sub(r'([?&](?:token|access_token|refresh_token|key|api_key|signature|sig|lsig|password|auth|authorization|cookie|policy|credential|x-amz-signature|x-amz-credential)=)[^\s&#\'"<>]+',
                   r'\1[REDACTED]', text, flags=re.I)
     text = re.sub(r'(?im)\b(authorization|proxy-authorization|cookie|set-cookie)(\s*[:=]\s*)[^\r\n]+',

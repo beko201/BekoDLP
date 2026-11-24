@@ -2,11 +2,9 @@
 
 An independent Windows app for downloading videos, audio, and playlists from YouTube and other sites supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp). Choose your output format, trim clips, and manage downloads through an English or Turkish interface.
 
-The current source version is **1.1**. The portable application targets **Windows x64**.
+The current source version is **1.1.1**. The portable application targets **Windows x64**.
 BekoDLP uses yt-dlp for downloading and FFmpeg for media processing, with a
 PySide6/Qt interface. It is not affiliated with the yt-dlp project.
-
-**This project was developed with AI using Claude and ChatGPT.**
 
 ## Features
 
@@ -39,7 +37,6 @@ and the media it makes available.
 ## Get started
 
 Download the latest published Windows package from [GitHub Releases](https://github.com/beko201/BekoDLP/releases).
-For version 1.1, the package is named **BekoDLP-1.1-Windows-x64.zip**.
 Extract it into a writable folder and run **BekoDLP.exe** inside **BekoDLP/**.
 Keep `_internal/`, `tools/`, `licenses/` and `package-manifest.json` alongside the EXE.
 The portable binary package includes Python and its media tools; no separate
@@ -180,9 +177,6 @@ completed files are not downloaded again. Clearing rows also updates the saved
 queue. Only tasks already added to the list are saved; links still being resolved
 have not yet become queue tasks.
 
-Version 1.1 reduces memory usage for large queues while preserving per-task
-choices and the configured download and conversion parallelism.
-
 ### When the queue finishes
 
 Use **When queue finishes** to open the download folder, close the application,
@@ -276,9 +270,24 @@ the installed yt-dlp executable and depends on the browser and operating system.
 
 Open **Advanced options → Network** to choose system proxy settings, a direct
 connection, or a custom HTTP/HTTPS/SOCKS proxy URL with an explicit port. These
-settings route yt-dlp requests; application updates and thumbnail previews use
-their own connections. A proxy URL, including any credentials it contains, is
-saved in preferences and task records.
+settings route yt-dlp requests and thumbnail previews. Application updates use
+their own connections. Thumbnail previews support HTTP and SOCKS5 proxies;
+SOCKS5h resolves target names through the proxy. HTTPS proxy, SOCKS4 and SOCKS4a
+previews are unavailable because Qt does not support those proxy transports.
+Custom-proxy failures, unsupported settings and loopback destinations (including
+redirects) never fall back to a direct preview connection. Direct mode explicitly
+disables proxying for previews. Each preview has isolated proxy connections and
+authentication state. On Windows, proxy URLs containing credentials are stored
+with current-user [Windows DPAPI protection](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
+in preferences, queue records and their valid backups. Existing readable plain-text
+records are migrated on load. Secret-free proxy URLs keep their normal format.
+
+Protected records depend on the Windows user profile and usually the original
+computer. If they cannot be opened, the original files are retained and writes
+are disabled rather than replacing the credentials. This protects files at rest;
+the running application and downloader still need the URL in memory. Saved
+profiles exclude connection credentials. Older external backups and corrupt
+recovery copies are not rewritten automatically.
 
 Set a speed limit in KiB/s or MiB/s; zero means unlimited. The limit applies per
 task, with parallel video and audio streams sharing it. Multiple active tasks
@@ -294,14 +303,8 @@ Downloading and installing each require your confirmation. You can also use
 **Help → Check for updates…**. Installation requires an idle queue.
 
 Updates replace the managed application files together and preserve preferences,
-the saved queue and downloads. The 1.1 source retains the portable-folder update
-protocol used by 1.0.
-
-For maintainers, the application version, package manifest and GitHub release
-tag must match. A release must have a higher version than the installed app;
-replacing an asset on the same release does not trigger an update. Publish the
-complete Windows ZIP, including its manifest and bundled tools. See the
-[release instructions](docs/building.md#8-prepare-the-github-release).
+the saved queue and downloads. Users of versions 1.0 and 1.1 must update manually:
+close the application and extract the new complete Windows package.
 
 ### Download-tool updates
 
@@ -318,42 +321,19 @@ the window immediately and cancels any active update job; cleanup follows when
 the job stops. If temporary files cannot be removed, the cleanup error is logged
 without preventing the window from closing. Errors preserve existing tools.
 Updates live in `tool-updates/`, separately from packaged binaries, together with
-the release URL, archive digest and executable hashes. The original packaged
-license/source audit continues to describe its original versions; downloaded
-versions have their own provenance and are not part of that pinned audit.
-
-## Development
-
-The project uses **Python 3.13 x64**, **PySide6/Qt**, **psutil** and **Unidecode**.
-Downloading runs through the standalone yt-dlp executable; FFmpeg/FFprobe handle
-media processing and inspection, and Deno supports JavaScript extraction.
-
-Follow [Build from source](docs/building.md) to prepare the environment, install
-the media tools, collect notices and create the portable Windows package.
-After setup, use the project's virtual environment:
-
-```powershell
-.\.venv\Scripts\python.exe main.py
-.\.venv\Scripts\python.exe tools/run_tests.py
-```
-
-The build produces `dist/BekoDLP/` and `dist/BekoDLP-1.1-Windows-x64.zip`.
-Source archives, test results and source runs do not replace testing the packaged
-application and an update from the previously published version.
+the release URL, archive digest and executable hashes.
 
 ## Documentation
 
 - [Build from source](docs/building.md)
 - [Libraries and sources](docs/libraries-and-sources.md)
-- [Release license review](docs/license-review.md)
+- [Third-party license information](docs/third-party-licenses.md)
 
 ## Help and contributing
 
 For download errors, double-click the failed task. The **Help** menu provides logs and diagnostic reports.
 
 Report bugs or suggest features through [GitHub Issues](https://github.com/beko201/BekoDLP/issues). Include the app version, steps to reproduce, and relevant error details. Review diagnostic reports for personal information before sharing.
-
-For code contributions, follow the [build guide](docs/building.md) and run the tests before opening a pull request. The project is maintained in [beko201/BekoDLP](https://github.com/beko201/BekoDLP).
 
 ## License
 

@@ -10,6 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from settings import QUALITIES, CODECS, _unique_object, _reject_constant, _finite_float
+from proxy_secrets import SecretProtectionError, protect_document, unprotect_document, has_plaintext_proxy
 
 SCHEMA_VERSION = 1
 MAX_QUEUE_BYTES = 16 * 1024 * 1024
@@ -103,30 +104,36 @@ class QueueStore:
         self.writable = True
         self._recovered = False
 
-    def _read(self, path):
+    def _read(self, path, *, migrate=False):
         with path.open('rb') as stream:
             content = stream.read(MAX_QUEUE_BYTES + 1)
         if len(content) > MAX_QUEUE_BYTES:
             raise ValueError('The saved queue exceeds the 16 MiB limit.')
         try:
-            return validate_document(json.loads(content.decode('utf-8-sig'), object_pairs_hook=_unique_object,
-                                               parse_constant=_reject_constant, parse_float=_finite_float))
+            original = json.loads(content.decode('utf-8-sig'), object_pairs_hook=_unique_object,
+                                  parse_constant=_reject_constant, parse_float=_finite_float)
+            document = unprotect_document(original)
+            result = validate_document(document)
+            if migrate and has_plaintext_proxy(original):
+                self._atomic_write(path, document)
+            return result
         except RecursionError as error:
             raise ValueError('The saved queue has excessive nesting.') from error
 
     def load(self):
         empty = dict(schema_version=SCHEMA_VERSION, tasks=[])
         try:
-            return self._read(self.path), []
+            self._protect_backup()
+            return self._read(self.path, migrate=True), []
         except FileNotFoundError:
             if not self.backup.exists():
                 return empty, []
             try:
-                return self._read(self.backup), ['The saved queue was restored from its backup.']
+                return self._read(self.backup, migrate=True), ['The saved queue was restored from its backup.']
             except (OSError, ValueError):
                 self.writable = False
                 raise
-        except (OSError, UnsupportedQueueVersion):
+        except (OSError, UnsupportedQueueVersion, SecretProtectionError):
             self.writable = False
             raise
         except ValueError as error:
@@ -134,7 +141,7 @@ class QueueStore:
             preserved = Path(str(self.path) + f'.corrupt-{time.time_ns()}')
             try:
                 shutil.copy2(self.path, preserved)
-                recovered = self._read(self.backup) if self.backup.exists() else empty
+                recovered = self._read(self.backup, migrate=True) if self.backup.exists() else empty
             except (OSError, ValueError):
                 self.writable = False
                 raise
@@ -142,7 +149,7 @@ class QueueStore:
             return recovered, [f'The saved queue was damaged. Original preserved at {preserved}. {error}']
 
     def _atomic_write(self, path, document):
-        content = (json.dumps(document, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode('utf-8')
+        content = (json.dumps(protect_document(document), ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode('utf-8')
         if len(content) > MAX_QUEUE_BYTES:
             raise ValueError('The saved queue exceeds the 16 MiB limit.')
         fd, temporary = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
@@ -155,15 +162,24 @@ class QueueStore:
         finally:
             Path(temporary).unlink(missing_ok=True)
 
+    def _protect_backup(self):
+        try:
+            self._read(self.backup, migrate=True)
+        except SecretProtectionError:
+            raise
+        except (FileNotFoundError, ValueError):
+            pass
+
     def save(self, document):
         if not self.writable:
             raise PermissionError('Queue writes are disabled to preserve the original file.')
         document = validate_document(document)
         try:
-            previous = self._read(self.path)
+            self._protect_backup()
+            previous = self._read(self.path, migrate=True)
         except FileNotFoundError:
             previous = None
-        except (OSError, UnsupportedQueueVersion):
+        except (OSError, UnsupportedQueueVersion, SecretProtectionError):
             self.writable = False
             raise
         except ValueError:
