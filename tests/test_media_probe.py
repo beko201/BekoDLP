@@ -38,7 +38,7 @@ class MediaProbeTests(unittest.TestCase):
         self.addCleanup(self.manager.close)
 
     def test_one_query_serves_codec_container_and_duration_in_nested_scope(self):
-        with patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as run:
+        with patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as run:
             with self.engine.media_probe_session():
                 probe = self.engine._ffprobe_media(str(self.path))
                 with self.engine.media_probe_session():
@@ -59,7 +59,7 @@ class MediaProbeTests(unittest.TestCase):
         replacement = self.folder / "replacement.mp4"
         replacement.write_bytes(b"new")
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as run:
+                patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as run:
             self.engine._ffprobe_media(self.path)
             self.path.write_bytes(b"longer updated media")
             self.engine._ffprobe_media(self.path)
@@ -73,7 +73,7 @@ class MediaProbeTests(unittest.TestCase):
     def test_ffmpeg_invalidates_output_even_on_failure_without_a_stat_change(self):
         command = ["ffmpeg", "-i", "input.wav", "-c", "copy", str(self.path)]
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as probe:
+                patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as probe:
             self.engine._ffprobe_media(self.path)
             with patch.object(self.engine, "_run_ffmpeg_process", side_effect=OSError("launch failed")):
                 with self.assertRaises(OSError):
@@ -83,7 +83,7 @@ class MediaProbeTests(unittest.TestCase):
 
     def test_fresh_verification_and_other_executables_bypass_cache(self):
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as run:
+                patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as run:
             self.engine._ffprobe_media(self.path)
             self.engine._ffprobe_media(self.path, fresh=True)
             self.assertEqual(run.call_count, 2)
@@ -98,7 +98,7 @@ class MediaProbeTests(unittest.TestCase):
         plan = build_output_plan({**OUTPUT_DEFAULTS, "quality": "1080p", "container": "mp4"}, sources)
         configured = ConfiguredOutput(self.engine)
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as run:
+                patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as run:
             self.engine._ffprobe_media(self.path)
             bad = document()
             bad["streams"][0]["codec_name"] = "vp9"
@@ -109,7 +109,7 @@ class MediaProbeTests(unittest.TestCase):
 
     def test_snapshot_isolation_and_failed_fresh_probe_cannot_reuse_old_data(self):
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as run:
+                patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as run:
             first = self.engine._ffprobe_media(self.path)
             first["streams"][0]["codec_name"] = "wrong"
             first["format"]["duration"] = "999"
@@ -126,13 +126,13 @@ class MediaProbeTests(unittest.TestCase):
         def changing(command, **kwargs):
             self.path.write_bytes(b"changed during inspection")
             return json.dumps(document())
-        with self.engine.media_probe_session(), patch.object(download_engine, "run_cmd_capture", side_effect=changing):
+        with self.engine.media_probe_session(), patch('engine_conversion.run_cmd_capture', side_effect=changing):
             with self.assertRaisesRegex(MediaOperationError, "changed"):
                 self.engine._ffprobe_media(self.path)
             self.assertFalse(self.engine._probe_cache.get().entries)
         for invalid in ("invalid json", "{}", '{"streams":"invalid","format":{"duration":2}}'):
             with self.subTest(invalid=invalid), self.engine.media_probe_session(), \
-                    patch.object(download_engine, "run_cmd_capture", return_value=invalid):
+                    patch('engine_conversion.run_cmd_capture', return_value=invalid):
                 with self.assertRaises((ValueError, MediaOperationError)):
                     self.engine._ffprobe_media(self.path)
                 self.assertFalse(self.engine._probe_cache.get().entries)
@@ -144,7 +144,7 @@ class MediaProbeTests(unittest.TestCase):
             self.engine._ffprobe_media(self.path)
             raise RuntimeError("attempt failed")
         with patch.object(self.engine, "_process_task_attempt", side_effect=attempt), \
-                patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as run:
+                patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as run:
             for _ in range(2):
                 with self.assertRaises(RuntimeError):
                     self.engine.process_task((tid, "https://example.com/probe"), 1)
@@ -153,7 +153,7 @@ class MediaProbeTests(unittest.TestCase):
             self.assertEqual(self.manager.get_task(tid)["attempt"], 2)
 
     def test_parallel_contexts_share_only_their_own_attempt_cache(self):
-        with patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document())) as run:
+        with patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document())) as run:
             with self.engine.media_probe_session(), ThreadPoolExecutor(max_workers=2) as pool:
                 futures = [pool.submit(copy_context().run, self.engine._ffprobe_media, self.path) for _ in range(2)]
                 for future in futures:
@@ -179,7 +179,7 @@ class MediaProbeTests(unittest.TestCase):
         cache.read(missing, "ffprobe", loader)
         self.assertEqual(loader.call_count, 2)
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", side_effect=DownloadCancelled()):
+                patch('engine_conversion.run_cmd_capture', side_effect=DownloadCancelled()):
             with self.assertRaises(DownloadCancelled):
                 self.engine._ffprobe_duration(self.path, self.engine.ffprobe)
             with self.assertRaises(DownloadCancelled):
@@ -191,7 +191,7 @@ class MediaProbeTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(probe_duration(document(value)), 0)
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", return_value=json.dumps(document("N/A"))) as run:
+                patch('engine_conversion.run_cmd_capture', return_value=json.dumps(document("N/A"))) as run:
             self.engine._ffprobe_media(self.path)
             self.assertEqual(self.engine._ffprobe_duration(self.path, self.engine.ffprobe), 0)
             self.assertEqual(run.call_count, 1)
@@ -206,7 +206,7 @@ class MediaProbeTests(unittest.TestCase):
         self.engine.ffmpeg = shutil.which("ffmpeg")
         self.engine.ffprobe = shutil.which("ffprobe")
         with self.engine.media_probe_session(), \
-                patch.object(download_engine, "run_cmd_capture", wraps=download_engine.run_cmd_capture) as run:
+                patch('engine_conversion.run_cmd_capture', wraps=download_engine.run_cmd_capture) as run:
             sources = SourcePreparer(self.engine).inspect_sources((source,), 0)
             self.assertEqual(sources.duration, 2)
             self.assertEqual(self.engine._ffprobe_duration(source, self.engine.ffprobe), 2)

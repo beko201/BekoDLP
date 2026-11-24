@@ -168,7 +168,7 @@ class CoverArtworkTests(unittest.TestCase):
         sources = SourcePreparer(self.manager.engine).inspect_sources([source], 1)
         metadata = self.metadata(subtitles=True)
         info = download_engine.YTInfo(self.base + '/watch', metadata.info)
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info), \
                 patch.object(SourcePreparer, 'prepare', return_value=sources) as downloaded:
             self.manager._process_task((tid, self.base + '/watch'), 1)
         task = self.manager.get_task(tid)
@@ -195,7 +195,7 @@ class CoverArtworkTests(unittest.TestCase):
         tid, source = self.task('video.mp4', options)
         sources = SourcePreparer(self.manager.engine).inspect_sources([source], 1)
         info = download_engine.YTInfo(self.base + '/watch', self.metadata(subtitles=True).info)
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info), \
                 patch.object(SourcePreparer, 'prepare', return_value=sources) as downloaded:
             self.manager._process_task((tid, self.base + '/watch'), 1)
         task = self.manager.get_task(tid)

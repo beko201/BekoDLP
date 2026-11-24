@@ -108,7 +108,7 @@ class LinkResolutionQueueTests(unittest.TestCase):
             return [url]
 
         with patch.object(download_engine, '_extract_urls_from_input', side_effect=resolve), \
-                patch('task_manager.log_error'):
+                patch('task_workers.log_error'):
             manager.submit_link('https://example.com/bad', options)
             for index in range(12):
                 manager.submit_link(f'https://example.com/{index}', options)
@@ -168,7 +168,7 @@ class LinkResolutionQueueTests(unittest.TestCase):
         options = TaskOptions(folder='.')
         url = 'https://example.com/retry'
         with patch.object(download_engine, '_extract_urls_from_input', side_effect=RuntimeError('offline')) as extract, \
-                patch('task_manager.log_error'):
+                patch('task_workers.log_error'):
             self.assertTrue(manager.submit_link(url, options))
             wait_until(lambda: manager.link_queue.unfinished_tasks == 0)
             self.assertFalse(manager._pending_link_keys)

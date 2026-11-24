@@ -9,6 +9,16 @@ from tools.prepare_release_notices import consolidate
 
 
 class CompactNoticeTests(unittest.TestCase):
+    def test_old_binary_review_cannot_be_relabelled_by_a_new_notice_inventory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = self.source(root)
+            self.write(source, 'LICENSE', b'Original license')
+            self.write(source, 'RELEASE_REVIEW.json', json.dumps({'version': '0.0.0'}).encode())
+            with self.assertRaisesRegex(ValueError, 'versions do not match'):
+                consolidate(source, root / 'compact')
+            self.assertFalse((root / 'compact').exists())
+
     def source(self, root):
         source = root / 'evidence'
         source.mkdir()

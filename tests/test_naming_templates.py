@@ -94,7 +94,7 @@ class NamingTemplateTests(unittest.TestCase):
             path = Path(folder, 'temporary.mkv')
             path.write_bytes(b'completed media')
             return str(path)
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info), \
                 patch('media_processing.ConfiguredOutput.process', process):
             self.manager.engine.process_task((tid, info.url), 1)
         task = self.manager.get_task(tid)
@@ -177,7 +177,7 @@ class NamingTemplateTests(unittest.TestCase):
             kwargs['on_entries']([{'url': f'https://example.com/{n}', 'playlist_title': 'Bulk playlist', 'playlist_index': n}
                                   for n in range(1, 104)])
             return {'_type': 'playlist'}, []
-        with patch('download_engine._flat_extract', side_effect=extract):
+        with patch('engine_metadata._flat_extract', side_effect=extract):
             PlaylistFetcher(self.manager, 'https://youtube.com/watch?v=chosen&list=PLtest', self.options, True).run()
         tasks = self.manager.list_tasks()
         self.assertEqual(len(tasks), 103)

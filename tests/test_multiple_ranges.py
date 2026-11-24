@@ -65,7 +65,7 @@ class MultipleRangeTests(unittest.TestCase):
 
     def test_full_download_once_order_names_and_queue_roundtrip(self):
         tid, options, _, sources = self.prepare(audio_codec='mp3', filename_template='Clips', subfolder_template='Edited')
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=self.info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info), \
                 patch.object(SourcePreparer, 'prepare', return_value=sources) as downloaded:
             self.manager._process_task((tid, 'offline'), 1)
         task = self.manager.get_task(tid)
@@ -91,7 +91,7 @@ class MultipleRangeTests(unittest.TestCase):
     def test_chapter_embedding_rebases_each_range(self):
         tid, _, _, sources = self.prepare(audio_codec='aac', container='m4a',
             trim_ranges='0.5 - 1.5\n2.5 - 3.5', chapter_mode='embed')
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=self.info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info), \
                 patch.object(SourcePreparer, 'prepare', return_value=sources):
             self.manager._process_task((tid, 'offline'), 1)
         task = self.manager.get_task(tid)
@@ -129,7 +129,7 @@ class MultipleRangeTests(unittest.TestCase):
             if count == 2:
                 raise MediaOperationError('second range failed')
             return original(*args, **kwargs)
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=self.info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info), \
                 patch.object(SourcePreparer, 'prepare', return_value=sources), \
                 patch.object(self.engine, '_run_ffmpeg', side_effect=fail_second):
             self.manager._process_task((tid, 'offline'), 1)

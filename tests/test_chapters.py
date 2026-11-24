@@ -102,7 +102,7 @@ class ChapterTests(unittest.TestCase):
     def test_engine_split_downloads_once_and_publishes_numbered_group_with_naming(self):
         tid, options, _, _, sources = self.prepare(chapter_mode='split', audio_codec='mp3',
             trim_start='1', trim_end='3', filename_template='Album', subfolder_template='Music')
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=self.info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info), \
                 patch.object(SourcePreparer, 'prepare', return_value=sources) as download:
             self.manager._process_task((tid, 'https://example.com/chapters'), 1)
         task = self.manager.get_task(tid)
@@ -188,7 +188,7 @@ class ChapterTests(unittest.TestCase):
             if len(calls) == 2:
                 raise MediaOperationError('second chapter failed')
             return original(*args, **kwargs)
-        with patch('download_engine.fetch_ytinfo_with_retry', return_value=self.info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info), \
                 patch.object(SourcePreparer, 'prepare', return_value=sources), \
                 patch.object(self.engine, '_run_ffmpeg', side_effect=fail_second):
             self.manager._process_task((tid, 'offline'), 1)

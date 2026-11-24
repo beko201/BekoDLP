@@ -8,10 +8,30 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from tools.collect_licenses import collect_distribution, collect_ffmpeg, collect_ytdlp, digest, runtime_distributions
+from tools.collect_licenses import (collect_distribution, collect_ffmpeg, collect_ytdlp, digest,
+                                   runtime_distributions, reset_stale_review)
 
 
 class LicenseCollectionTests(unittest.TestCase):
+    def test_old_review_is_retained_and_replaced_with_an_explicit_prebuild_record(self):
+        from app_info import APP_VERSION
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            previous = b'{"application": "BekoDLP", "version": "0.0.0", "status": "REVIEW_BLOCKED"}'
+            (output / 'RELEASE_REVIEW.json').write_bytes(previous)
+            (output / 'RELEASE_REVIEW.md').write_text('Old release review')
+            reset_stale_review(output)
+            current = json.loads((output / 'RELEASE_REVIEW.json').read_text())
+            self.assertEqual(current['version'], APP_VERSION)
+            self.assertEqual(current['phase'], 'prebuild')
+            self.assertEqual(current['status'], 'REVIEW_REQUIRED')
+            saved = list((output / 'verification').glob('previous-review-*.json'))
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0].read_bytes(), previous)
+            current_bytes = (output / 'RELEASE_REVIEW.json').read_bytes()
+            reset_stale_review(output)
+            self.assertEqual((output / 'RELEASE_REVIEW.json').read_bytes(), current_bytes)
+
     def test_standalone_notices_are_bound_to_the_exact_binary_and_release(self):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp)

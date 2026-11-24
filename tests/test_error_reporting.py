@@ -211,7 +211,7 @@ class ErrorReportingTests(unittest.TestCase):
                 manager = self.make_logging_manager()
                 url = 'https://example.com/failure'
                 tid = manager.add_urls([url], TaskOptions(folder=str(self.folder)))[0]
-                with patch('download_engine.fetch_ytinfo_with_retry',
+                with patch('engine_metadata.fetch_ytinfo_with_retry',
                            side_effect=error_type('metadata operation failed')):
                     manager._process_task((tid, url), 1)
                 text = self.text()

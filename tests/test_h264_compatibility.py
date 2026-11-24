@@ -75,7 +75,7 @@ class H264CompatibilityTests(unittest.TestCase):
             shutil.copyfile(source, destination)
             return str(destination)
 
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info), \
                 patch.object(self.engine, '_download_format', side_effect=download):
             self.manager._process_task((self.tid, 'url'), 1)
         return self.manager.get_task(self.tid)
@@ -104,7 +104,7 @@ class H264CompatibilityTests(unittest.TestCase):
             shutil.copyfile(video if key == 'video' else audio, destination)
             return str(destination)
 
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info), \
                 patch.object(self.engine, '_download_format', side_effect=download):
             self.manager._process_task((self.tid, 'url'), 1)
         return self.manager.get_task(self.tid)
@@ -237,7 +237,7 @@ class H264CompatibilityTests(unittest.TestCase):
             instance.extract_info.side_effect = extract
             return instance
 
-        with patch.object(download_engine, 'YtDlpProcess', side_effect=ydl):
+        with patch('engine_transfers.YtDlpProcess', side_effect=ydl):
             self.engine._complete_via_selector(self.tid, 1, 'url', 'Example', 'Example',
                                                'MP4', 1080, True, '', '', folder=str(self.output))
         task = self.manager.get_task(self.tid)

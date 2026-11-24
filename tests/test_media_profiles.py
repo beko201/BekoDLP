@@ -210,7 +210,7 @@ class RealOutputTests(unittest.TestCase):
             path = Path(folder, filename)
             shutil.copyfile(self.faststart, path)
             return str(path)
-        with patch.object(download_engine, "fetch_ytinfo_with_retry", return_value=self.info(self.faststart)), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info(self.faststart)), \
                 patch.object(self.engine, "_download_format", side_effect=download), \
                 patch.object(self.engine, "_ffprobe_media", side_effect=probe):
             self.manager._process_task((tid, "https://example.com/verify"), 1)
@@ -352,7 +352,7 @@ class RealOutputTests(unittest.TestCase):
             path = Path(folder, filename)
             shutil.copyfile(source, path)
             return str(path)
-        with patch.object(download_engine, "fetch_ytinfo_with_retry", return_value=self.info(source)), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info(source)), \
                 patch.object(self.engine, "_download_format", side_effect=download):
             self.manager._process_task((tid, "https://example.com/automatic"), 1)
         task = self.manager.get_task(tid)
@@ -370,7 +370,7 @@ class RealOutputTests(unittest.TestCase):
             path = Path(folder, filename)
             shutil.copyfile(self.source, path)
             return str(path)
-        with patch.object(download_engine, "fetch_ytinfo_with_retry", return_value=self.info(self.source)), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info(self.source)), \
                 patch.object(self.engine, "_download_format", side_effect=download), \
                 patch.object(self.engine, "available_encoders", return_value=set()):
             self.manager._process_task((tid, "https://example.com/fail"), 1)

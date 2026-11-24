@@ -8,6 +8,9 @@ import threading
 from unittest.mock import Mock
 
 import download_engine
+import engine_conversion
+import engine_metadata
+import engine_transfers
 import task_manager
 import utils
 
@@ -78,9 +81,9 @@ class _ComponentNamespace:
         for module in (utils, download_engine, task_manager):
             for name in vars(module):
                 owners.setdefault(name, module)
-        for name in ('psutil', 'run_cmd_capture', 'fetch_ytinfo_with_retry', 'YtDlpProcess',
-                     '_extract_urls_from_input'):
-            owners[name] = download_engine
+        owners.update(psutil=download_engine, run_cmd_capture=engine_conversion,
+                      fetch_ytinfo_with_retry=engine_metadata, YtDlpProcess=engine_transfers,
+                      _flat_extract=engine_metadata, _extract_urls_from_input=download_engine)
         object.__setattr__(self, '_owners', owners)
         object.__setattr__(self, 'ComponentHarness', TestApplication)
 

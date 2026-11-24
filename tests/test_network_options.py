@@ -3,6 +3,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from dataclasses import asdict
+import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import tempfile
@@ -79,7 +80,7 @@ class NetworkOptionsTests(unittest.TestCase):
             PlaylistFetcher(self.manager, 'https://example.com/video', options).run()
         self.assertEqual(resolve.call_args.kwargs['network_options'], self.choice)
         info = download_engine.YTInfo('https://example.com/video', {'id': 'test'}, network_options=self.choice)
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=info) as fetch:
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info) as fetch:
             info._media_info.refresh(0, threading.Event(), None)
         self.assertEqual(fetch.call_args.kwargs['network_options'], self.choice)
 
@@ -137,11 +138,31 @@ class NetworkOptionsTests(unittest.TestCase):
             self.assertNotIn('private-pass', _log_text(f'{scheme}://user:private-pass@localhost:8080'))
 
     def test_real_cli_routes_metadata_and_rate_limited_media_through_a_local_proxy(self):
+        self._assert_local_proxy_transfer(authenticated=False)
+
+    def test_real_cli_routes_authenticated_metadata_and_media_without_credentials_in_cmdline(self):
+        self._assert_local_proxy_transfer(authenticated=True)
+
+    def test_real_cli_proxy_config_preserves_unicode_and_quoted_credentials(self):
+        self._assert_local_proxy_transfer(authenticated=True, password="páss'\"\\@word")
+
+    def _assert_local_proxy_transfer(self, *, authenticated, password='private-pass'):
         paths = []
+        authorization = []
+        command_lines = []
+        expected_auth = {'Basic ' + base64.b64encode(('audit-user:' + password).encode(encoding)).decode('ascii')
+                         for encoding in ('utf-8', 'latin-1')}
         payload = b'x' * (256 * 1024)
         class Proxy(BaseHTTPRequestHandler):
             def respond(self, body):
                 paths.append(self.path)
+                authorization.append(self.headers.get('Proxy-Authorization'))
+                if authenticated and self.headers.get('Proxy-Authorization') not in expected_auth:
+                    self.send_response(407)
+                    self.send_header('Proxy-Authenticate', 'Basic realm="audit"')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
                 watch = urlsplit(self.path).path == '/watch.html'
                 content = b'<title>Proxy media</title><video src="http://media.example.invalid/media.mp4"></video>' if watch else payload
                 self.send_response(200)
@@ -159,19 +180,31 @@ class NetworkOptionsTests(unittest.TestCase):
         server = ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=.02), daemon=True)
         thread.start()
-        selected = dict(proxy_mode='custom', proxy_url=f'http://127.0.0.1:{server.server_port}', download_rate='131072')
+        credentials = 'audit-user:' + password + '@' if authenticated else ''
+        selected = dict(proxy_mode='custom', proxy_url=f'http://{credentials}127.0.0.1:{server.server_port}', download_rate='131072')
         url = 'http://media.example.invalid/watch.html'
         try:
-            info = download_engine.fetch_ytinfo_with_retry(url, max_retries=1, network_options=selected)
-            tid = self.manager.add_urls([url], TaskOptions(folder=str(self.folder), **selected))[0]
-            self.manager.tid_to_workerid[tid] = 1
-            started = time.monotonic()
-            output = self.manager.engine._download_format(tid, 'video', url, info.formats[0], 'limited.mp4', folder=str(self.folder))
+            import ytdlp_process
+            original_spawn = ytdlp_process.spawn_owned_process
+            def spawn(args, **kwargs):
+                command_lines.append(list(args))
+                return original_spawn(args, **kwargs)
+            with patch('ytdlp_process.spawn_owned_process', side_effect=spawn):
+                info = download_engine.fetch_ytinfo_with_retry(url, max_retries=1, network_options=selected)
+                tid = self.manager.add_urls([url], TaskOptions(folder=str(self.folder), **selected))[0]
+                self.manager.tid_to_workerid[tid] = 1
+                started = time.monotonic()
+                output = self.manager.engine._download_format(tid, 'video', url, info.formats[0], 'limited.mp4', folder=str(self.folder))
             self.assertGreaterEqual(time.monotonic() - started, 1.5)
             self.assertEqual(Path(output).read_bytes(), payload)
             self.assertTrue(any('/watch.html' in p for p in paths))
             self.assertTrue(any('/media.mp4' in p for p in paths))
             self.assertTrue(all(p.startswith('http://media.example.invalid/') for p in paths))
+            if authenticated:
+                self.assertTrue(all(value in expected_auth for value in authorization))
+                self.assertGreaterEqual(len(command_lines), 2)
+                self.assertNotIn(password, str(command_lines))
+                self.assertNotIn('audit-user', str(command_lines))
         finally:
             server.shutdown()
             thread.join(2)

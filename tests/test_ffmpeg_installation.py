@@ -1,13 +1,30 @@
 """Portable tool precedence and verified archive path checks."""
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from tools.install_ffmpeg import VERSION, validate_members
+from tools.install_ffmpeg import VERSION, validate_members, replace_directory
 import utils
 
 
 class PortableFFmpegTests(unittest.TestCase):
+    def test_transient_windows_lock_retries_the_same_directory_move(self):
+        source, destination = Mock(), Mock()
+        source.replace.side_effect = [PermissionError('locked'), None]
+        with patch('tools.install_ffmpeg.time.sleep') as sleep:
+            replace_directory(source, destination)
+        self.assertEqual(source.replace.call_count, 2)
+        source.replace.assert_called_with(destination)
+        sleep.assert_called_once_with(.2)
+
+    def test_persistent_lock_and_other_errors_are_not_silently_ignored(self):
+        for failure, attempts in ((PermissionError('locked'), 30), (OSError('failed'), 1)):
+            source = Mock()
+            source.replace.side_effect = failure
+            with patch('tools.install_ffmpeg.time.sleep'), self.assertRaises(type(failure)):
+                replace_directory(source, Mock())
+            self.assertEqual(source.replace.call_count, attempts)
+
     def test_archive_paths_stay_within_expected_release_directory(self):
         root = f'ffmpeg-{VERSION}-full_build'
         validate_members([root + '/', root + '/bin/ffmpeg.exe', root + '/LICENSE'])

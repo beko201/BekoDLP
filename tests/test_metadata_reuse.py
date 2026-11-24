@@ -84,7 +84,7 @@ class MetadataReuseTests(unittest.TestCase):
     def test_expired_parallel_urls_share_one_refresh_and_keep_selected_formats(self):
         self.expired_barrier = threading.Barrier(2)
         with patch.object(download_engine.YtDlpProcess, 'extract_info', side_effect=AssertionError('redundant extraction')), \
-                patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=self.info()) as refresh:
+                patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info()) as refresh:
             video, audio = self.group(self.info(expired=True))
         refresh.assert_called_once()
         self.assertEqual(Path(video).read_bytes(), b'video' * 100)
@@ -112,8 +112,8 @@ class MetadataReuseTests(unittest.TestCase):
         def convert(tid, worker_id, source, output):
             Path(output).write_bytes(Path(source).read_bytes())
 
-        with patch.object(download_engine, '_flat_extract', return_value=(info._media_info.info, None)), \
-                patch.object(download_engine, 'fetch_ytinfo_with_retry') as fetch, \
+        with patch('engine_metadata._flat_extract', return_value=(info._media_info.info, None)), \
+                patch('engine_metadata.fetch_ytinfo_with_retry') as fetch, \
                 patch.object(download_engine.YtDlpProcess, 'extract_info', side_effect=AssertionError('redundant extraction')), \
                 patch.object(manager.engine, '_ffmpeg_convert_to_mp3', side_effect=convert):
             PlaylistFetcher(manager, info.url, self.options, False).run()
@@ -142,7 +142,7 @@ class MetadataReuseTests(unittest.TestCase):
         ydl = Mock()
         expired = HTTPError(self.base, 403, 'expired', {}, None)
         ydl.process_ie_result.side_effect = expired
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=self.info()) as refresh:
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info()) as refresh:
             with self.assertRaises(HTTPError):
                 self.engine._download_from_info(
                     ydl, 'url', self.info()._media_info, threading.Event(), format_id='video')
@@ -162,7 +162,7 @@ class MetadataReuseTests(unittest.TestCase):
                     raise InsufficientDiskSpace('no space')
 
                 ydl.process_ie_result.side_effect = fail
-                with patch.object(download_engine, 'fetch_ytinfo_with_retry') as refresh:
+                with patch('engine_metadata.fetch_ytinfo_with_retry') as refresh:
                     with self.assertRaises(DownloadCancelled if cancel else InsufficientDiskSpace):
                         self.engine._download_from_info(
                             ydl, 'url', self.info()._media_info, threading.Event(),
@@ -174,7 +174,7 @@ class MetadataReuseTests(unittest.TestCase):
         fresh['formats'][0].update(format_id='4k', height=2160)
         ydl = Mock()
         ydl.process_ie_result.side_effect = HTTPError(self.base, 403, 'expired', {}, None)
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry',
+        with patch('engine_metadata.fetch_ytinfo_with_retry',
                           return_value=download_engine.YTInfo('url', fresh)):
             with self.assertRaisesRegex(RuntimeError, 'selected format was not found'):
                 self.engine._download_from_info(

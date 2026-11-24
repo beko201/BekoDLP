@@ -85,7 +85,7 @@ class ConfiguredTrimTests(unittest.TestCase):
         args = self.prepare(audio_codec="mp3", trim_start="1", trim_end="2")
         configured, _, _, sources, _ = args
         configured.sources.prepare = lambda *unused: configured.sources.inspect_sources(sources.paths, 0)
-        with patch.object(download_engine, "run_cmd_capture", wraps=download_engine.run_cmd_capture) as run, \
+        with patch('engine_conversion.run_cmd_capture', wraps=download_engine.run_cmd_capture) as run, \
                 patch.object(self.engine, "_ffprobe_duration", side_effect=AssertionError("separate duration query")):
             output = self.process(*args)
         probes = [call.args[0] for call in run.call_args_list if call.args[0][0] == self.engine.ffprobe]
@@ -211,7 +211,7 @@ class ConfiguredTrimTests(unittest.TestCase):
         args = self.prepare(audio_codec="mp3", trim_start="1", trim_end="2")
         _, tid, _, sources, _ = args
         info = SimpleNamespace(title="Published", duration=4, thumbnail_url=None)
-        with patch("download_engine.fetch_ytinfo_with_retry", return_value=info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info), \
                 patch.object(SourcePreparer, "prepare", return_value=sources), \
                 patch.object(self.engine, "_maybe_trim", side_effect=AssertionError("already cut")), \
                 patch.object(self.engine, "_run_ffmpeg", wraps=self.engine._run_ffmpeg) as runner:

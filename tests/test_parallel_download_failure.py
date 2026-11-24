@@ -89,7 +89,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
 
                         return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-                    with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl):
+                    with patch('engine_transfers.YtDlpProcess', side_effect=fake_ydl):
                         thread, results = self.run_async(self.group)
                         thread.join(1.5)
                         try:
@@ -116,7 +116,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
                 Path(options['outtmpl']).write_bytes(options['format'].encode())
             return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-        with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl):
+        with patch('engine_transfers.YtDlpProcess', side_effect=fake_ydl):
             with self.assertRaisesRegex(OSError, 'first attempt failed'):
                 self.group()
             self.assertFalse(self.manager.is_cancelled(self.tid))
@@ -132,8 +132,8 @@ class ParallelDownloadFailureTests(unittest.TestCase):
                 raise OSError('original download error')
             return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-        with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl), \
-                patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=self.info), \
+        with patch('engine_transfers.YtDlpProcess', side_effect=fake_ydl), \
+                patch('engine_metadata.fetch_ytinfo_with_retry', return_value=self.info), \
                 patch.object(self.manager, '_log_task_error') as log_error:
             self.manager._process_task((self.tid, 'url'), 1)
         self.assertEqual(self.manager.get_task(self.tid)['status'], 'Error: original download error')
@@ -155,7 +155,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
                         time.sleep(0.01)
             return nullcontext(type('FakeYDL', (), {'download': staticmethod(download)})())
 
-        with patch.object(download_engine, 'YtDlpProcess', side_effect=fake_ydl):
+        with patch('engine_transfers.YtDlpProcess', side_effect=fake_ydl):
             thread, results = self.run_async(self.group)
             ready.wait(2)
             self.manager.cancel_task(self.tid)
@@ -216,7 +216,7 @@ class ParallelDownloadFailureTests(unittest.TestCase):
 
         with patch.object(download_engine.threading, 'Thread', side_effect=make_thread), \
                 patch.object(self.engine, '_download_format', side_effect=download), \
-                patch.object(download_engine, 'remove_leftovers', side_effect=checked_cleanup) as cleaned:
+                patch('engine_transfers.remove_leftovers', side_effect=checked_cleanup) as cleaned:
             try:
                 operation.start()
                 self.assertTrue(signalled.wait(2))

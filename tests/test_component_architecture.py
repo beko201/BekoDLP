@@ -49,7 +49,7 @@ class ComponentArchitectureTests(unittest.TestCase):
         self.assertTrue(manager.cancel_task(old_tid))
         new_tid = manager.add_urls([url], options)[0]
 
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry') as fetch:
+        with patch('engine_metadata.fetch_ytinfo_with_retry') as fetch:
             manager._process_task(manager.task_queue.get_nowait(), 1)
             manager.task_queue.task_done()
         fetch.assert_not_called()
@@ -188,7 +188,7 @@ else:
             return str(destination)
 
         manager.engine._download_format = download
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=info):
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info):
             manager.set_worker_count(1)
             manager.add_urls(['https://example.com/offline'], TaskOptions(
                 folder=str(target), format='MP3', mp3_bitrate='128k', trim_start='0.1', trim_end='0.6'))

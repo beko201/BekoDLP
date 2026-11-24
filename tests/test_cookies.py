@@ -153,7 +153,7 @@ class CookieTests(unittest.TestCase):
     def test_expired_url_refresh_keeps_the_original_cookie_source(self):
         info = download_engine.YTInfo('https://example.com/video', {'id': 'test'}, self.selection)
         refreshed = download_engine.YTInfo('https://example.com/video', {'id': 'new'}, self.selection)
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=refreshed) as fetch:
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=refreshed) as fetch:
             info._media_info.refresh(0, threading.Event(), None)
         self.assertEqual(fetch.call_args.kwargs['cookie_options'], self.selection)
 

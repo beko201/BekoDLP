@@ -127,7 +127,7 @@ class DownloadPauseTests(unittest.TestCase):
                 self.manager.paused = True
                 self.manager.update_task(self.tid, status='Queued')
                 stop_event = threading.Event()
-                with patch.object(download_engine, 'YtDlpProcess') as ydl:
+                with patch('engine_transfers.YtDlpProcess') as ydl:
                     thread, results = self.run_async(lambda: self.engine._download_format(
                         self.tid, 'video', self.info.url, self.info.video_only_formats()[0],
                         'video.mp4', folder=str(self.folder), stop_event=stop_event))
@@ -147,7 +147,7 @@ class DownloadPauseTests(unittest.TestCase):
                     self.assertFalse(self.manager.is_cancelled(self.tid))
 
     def test_paused_task_does_not_start_metadata_extraction(self):
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry') as fetch:
+        with patch('engine_metadata.fetch_ytinfo_with_retry') as fetch:
             thread, results = self.run_async(lambda: self.engine.process_task((self.tid, self.info.url), 1))
             fetch.assert_not_called()
             self.manager.cancel_task(self.tid)

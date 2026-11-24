@@ -85,7 +85,7 @@ class ContainerMergeTests(unittest.TestCase):
             self.manager.report_progress(tid, key, size, size)
             return str(path)
 
-        with patch.object(download_engine, 'fetch_ytinfo_with_retry', return_value=info), \
+        with patch('engine_metadata.fetch_ytinfo_with_retry', return_value=info), \
                 patch.object(self.engine, '_download_format', side_effect=download):
             self.manager._process_task((self.tid, 'url'), 1)
         return self.manager.get_task(self.tid)
