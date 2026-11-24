@@ -31,6 +31,8 @@ def consolidate(source, destination):
         raise ValueError('Notice inventory does not match the application version.')
     review_path = source / 'RELEASE_REVIEW.json'
     review = json.loads(review_path.read_text(encoding='utf-8')) if review_path.exists() else {}
+    if review.get('version', APP_VERSION) != APP_VERSION:
+        raise ValueError('Release review and notice inventory versions do not match.')
     groups, files = {}, []
     for path in sorted(source.rglob('*')):
         if path.is_symlink() or getattr(path.lstat(), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:

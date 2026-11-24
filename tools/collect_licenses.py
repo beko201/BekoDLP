@@ -186,6 +186,33 @@ def collect_ytdlp(output, *, fetch=False):
     return record
 
 
+def reset_stale_review(output):
+    """Keep an older review as evidence, without attaching it to a new version."""
+    path = output / 'RELEASE_REVIEW.json'
+    if not path.is_file():
+        return
+    previous = json.loads(path.read_text(encoding='utf-8'))
+    if (previous.get('application'), previous.get('version')) == (APP_NAME, APP_VERSION):
+        return
+    identifier = digest(path)
+    retained = output / 'verification' / ('previous-review-' + identifier)
+    retained.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, retained.with_suffix('.json'))
+    markdown = output / 'RELEASE_REVIEW.md'
+    if markdown.is_file():
+        shutil.copy2(markdown, retained.with_suffix('.md'))
+    review = {'application': APP_NAME, 'version': APP_VERSION, 'phase': 'prebuild',
+              'status': 'REVIEW_REQUIRED', 'previous_review_sha256': identifier,
+              'open_items': [{'id': 'actual-binary-review', 'status': 'pending-build',
+                              'detail': 'Audit the actual executable and package for this version; '
+                                        'the retained earlier review is not its binary review.'}]}
+    path.write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
+    markdown.write_text(f'# {APP_NAME} {APP_VERSION} license review\n\n'
+                        '**REVIEW_REQUIRED**. Prebuild notice collection only.\n'
+                        'The earlier review was retained under verification/.\n'
+                        'The actual executable and package still require an audit.\n', encoding='utf-8')
+
+
 def collect(output, *, fetch=False):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -231,6 +258,7 @@ def collect(output, *, fetch=False):
     rows.extend(['', '## Acknowledgements', '',
                  '[ytdlp-interface](https://github.com/ErrorFlynn/ytdlp-interface) by ErrorFlynn',
                  'was consulted for feature comparison and inspiration.'])
+    reset_stale_review(output)
     (output / 'THIRD_PARTY_NOTICES.md').write_text('\n'.join(rows) + '\n', encoding='utf-8')
     return manifest
 

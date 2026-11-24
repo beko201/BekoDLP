@@ -5,17 +5,20 @@ import json
 from pathlib import Path
 import re
 import ssl
+import sys
 from urllib.request import Request, urlopen
 
 import certifi
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from app_info import APP_VERSION
 BASE = ROOT / 'build/license-audit'
 CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def get(url):
-    with urlopen(Request(url, headers={'User-Agent': 'BekoDLP-license-evidence/1.0'}),
+    with urlopen(Request(url, headers={'User-Agent': f'BekoDLP-license-evidence/{APP_VERSION}'}),
                  context=CONTEXT, timeout=30) as response:
         return response.read()
 

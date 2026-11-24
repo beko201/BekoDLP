@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from utils import NO_WINDOW, which_executable
 from queue_store import QueueStore
 from subtitle_processing import read_cues
+from tools.install_ffmpeg import VERSION as EXPECTED_FFMPEG_VERSION
 
 
 def main():
@@ -164,7 +165,7 @@ def main():
                     else:
                         assert len([stream for stream in probe['streams'] if stream['codec_type'] == 'subtitle']) == 1
                 startup = (folder / 'debug.log').read_text(encoding='utf-8')
-                assert 'FFmpeg  : 9.0.2' in startup and 'Deno    : 2.9.8' in startup
+                assert f'FFmpeg  : {EXPECTED_FFMPEG_VERSION}' in startup and 'Deno    : 2.9.8' in startup
                 assert not (folder / 'errors.log').exists() or '[ERROR]' not in (folder / 'errors.log').read_text(encoding='utf-8')
                 report.append({'language': language, 'output': output[0].name, 'duration': duration,
                                'trim': language == 'tr', 'system_tools_removed_from_PATH': True,

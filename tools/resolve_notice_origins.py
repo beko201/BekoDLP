@@ -1,13 +1,18 @@
 """Bind old crates without VCS metadata to upstream revisions by source comparison."""
 from concurrent.futures import ThreadPoolExecutor
+import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import tarfile
 import tomllib
 
-from verify_runtime_notices import BASE, ROOT, NOTICES, FILENAMES, fetch, license_text
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.verify_runtime_notices import BASE, NOTICES, FILENAMES, fetch, license_text, repository_name
 
 # Candidate revisions, not assertions. Manifest identity and every published Rust
 # source must match before any candidate can supply a package notice.
@@ -17,15 +22,40 @@ CANDIDATES = {'valuable': ('tokio-rs/valuable', 'v0.1.0', 'valuable'),
               'winapi-x86_64-pc-windows-gnu': ('retep998/winapi-rs', '0.3.9', 'x86_64')}
 
 
+def manifest_identity(package, workspace):
+    """Resolve only identity fields inherited from a monorepo workspace."""
+    result = {}
+    for key in ('name', 'version', 'license'):
+        value = package.get(key)
+        if isinstance(value, dict) and value.get('workspace') is True:
+            value = workspace.get('workspace', {}).get('package', {}).get(key)
+        result[key] = value
+    return result
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--only', nargs='*', help='Recheck only these crate names.')
+    parser.add_argument('--swc-ref', default='v1.15.0', help='Candidate SWC tag; source matching is still required.')
+    args = parser.parse_args()
     records_path = BASE / 'deno-cargo-sources.json'
     records = json.loads(records_path.read_text(encoding='utf-8'))
     report_path = BASE / 'runtime-notice-recheck.json'
     report = json.loads(report_path.read_text(encoding='utf-8'))
+    # This release is a candidate, never a substitute for comparing the actual
+    # checksum-bound crate. Every published Rust source still has to match.
+    missing = {(r['name'], r['version']) for r in
+               json.loads((BASE / 'review.json').read_text(encoding='utf-8'))['deno_package_notices_unverified']}
     for record in records:
-        if record['name'] not in CANDIDATES:
+        if args.only is not None and record['name'] not in args.only:
             continue
-        repo, ref, directory = CANDIDATES[record['name']]
+        candidate = CANDIDATES.get(record['name'])
+        if ((record['name'], record['version']) in missing
+                and repository_name(record.get('repository')) == 'swc-project/swc'):
+            candidate = ('swc-project/swc', args.swc_ref, record['vcs']['path_in_vcs'])
+        if candidate is None:
+            continue
+        repo, ref, directory = candidate
         evidence = {'name': record['name'], 'version': record['version'], 'crate_sha256': record['sha256'],
                     'repository': repo, 'candidate_ref': ref, 'source_directory': directory,
                     'attempts': [], 'notices': [], 'status': 'source_comparison_failed'}
@@ -58,7 +88,13 @@ def main():
         matches = False
         if content:
             upstream = tomllib.loads(content.decode('utf-8')).get('package', {})
-            matches = all(upstream.get(key) == package.get(key) for key in ('name', 'version', 'license'))
+            workspace = {}
+            if any(isinstance(upstream.get(key), dict) for key in ('name', 'version', 'license')):
+                root_content, root_receipt = fetch(base_url + 'Cargo.toml')
+                evidence['attempts'].append(root_receipt)
+                if root_content:
+                    workspace = tomllib.loads(root_content.decode('utf-8'))
+            matches = manifest_identity(upstream, workspace) == manifest_identity(package, {})
         evidence['manifest_identity_matches'] = matches
         if matches and rust:
             def compare(item):
@@ -93,6 +129,7 @@ def main():
         report['records'].append(evidence)
         print(record['name'], evidence['status'], evidence.get('rust_sources_compared', 0), flush=True)
     report['records'].sort(key=lambda r: (r['name'], r['version']))
+    report['checked_at'] = datetime.now(timezone.utc).isoformat()
     records_path.write_text(json.dumps(records, indent=2) + '\n', encoding='utf-8')
     report_path.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
 

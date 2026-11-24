@@ -405,8 +405,9 @@ class MainWindow(QMainWindow):
         self.thumbnails.request(tid)
 
     def _register_thumbnail(self, tid, url):
-        if not self._closing and self.controller.manager.get_task(tid) is not None:
-            self.thumbnails.register(tid, url)
+        task = self.controller.manager.get_task(tid)
+        if not self._closing and task is not None:
+            self.thumbnails.register(tid, url, task)
             if tid == self._preview_tid:
                 self.thumbnails.request(tid)
 

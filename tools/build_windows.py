@@ -15,6 +15,7 @@ from app_info import APP_NAME, APP_VERSION, APP_EXECUTABLE
 from package_layout import MANIFEST_NAME, MANAGED_ENTRIES, create_manifest, parse_manifest, file_sha256
 from utils import which_executable
 from tools.prepare_release_notices import consolidate
+from tools.windows_version import version_resource
 
 
 def build():
@@ -59,9 +60,12 @@ def build():
     if not image.save(str(icon), 'ICO'):
         raise SystemExit('Could not generate the Windows icon.')
 
+    version_file = work / 'version-info.txt'
+    version_file.write_text(version_resource(), encoding='utf-8')
+
     staging = ROOT / 'build/package-staging'
     args = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onedir', '--contents-directory', '_internal', '--windowed', '--noupx',
-            '--name', APP_NAME, '--icon', str(icon),
+            '--name', APP_NAME, '--icon', str(icon), '--version-file', str(version_file),
             '--specpath', str(work), '--workpath', str(work / 'work'), '--distpath', str(staging),
             '--runtime-hook', str(ROOT / 'tools/pyinstaller_runtime.py'),
             '--additional-hooks-dir', str(ROOT / 'tools/build_hooks'),

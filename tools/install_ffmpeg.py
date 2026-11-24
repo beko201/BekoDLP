@@ -4,12 +4,25 @@ from pathlib import Path, PurePosixPath
 import platform
 import shutil
 import subprocess
+import time
 import uuid
 from urllib.request import Request, urlopen
 
-VERSION = '9.0.2'
-URL = f'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-{VERSION}-full_build.7z'
-SHA256 = 'f0e46253c70dfe902bac915dfb4224f0cf1b7c6eeab9da2ccc9a5581f9a71b13'
+VERSION = '9.1'
+URL = f'https://github.com/GyanD/codexffmpeg/releases/download/{VERSION}/ffmpeg-{VERSION}-full_build.7z'
+SHA256 = '1a86f2c8b51b4990ae9a0b0f8bd4f345f5c79389d293ac3fda128a58ec507b16'
+
+
+def replace_directory(source, destination):
+    # Windows scanners may briefly hold freshly executed tool files open.
+    for attempt in range(30):
+        try:
+            source.replace(destination)
+            return
+        except PermissionError:
+            if attempt == 29:
+                raise
+            time.sleep(.2)
 
 
 def validate_members(names):
@@ -60,12 +73,12 @@ def main():
             if '--enable-nonfree' in result.stdout:
                 raise ValueError('A nonfree FFmpeg build must not be distributed.')
         if target.exists():
-            target.replace(backup)
+            replace_directory(target, backup)
         try:
-            package.replace(target)
+            replace_directory(package, target)
         except OSError:
             if backup.exists():
-                backup.replace(target)
+                replace_directory(backup, target)
             raise
         print('SHA-256 verified. Installed:', target, flush=True)
         if backup.exists():
