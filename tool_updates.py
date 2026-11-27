@@ -16,7 +16,9 @@ import uuid
 import zipfile
 
 import app_paths
-from utils import DownloadCancelled, NO_WINDOW, which_executable, portable_deno_path
+from errors import DownloadCancelled
+from process_utils import NO_WINDOW
+from runtime_tools import which_executable, portable_deno_path
 
 SPECS = {'ytdlp': ('yt-dlp/yt-dlp', 'yt-dlp.exe', ('yt-dlp.exe',)),
          'deno': ('denoland/deno', 'deno-x86_64-pc-windows-msvc.zip', ('deno.exe',)),
@@ -50,10 +52,11 @@ class SecureRedirect(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def read_url(url, *, cancel, limit, output=None, progress=None, expected=None):
+def read_url(url, *, cancel, limit, output=None, progress=None, expected=None,
+             accept='application/octet-stream'):
     check_cancel(cancel)
     trusted_url(url)
-    request = Request(url, headers={'User-Agent': 'BekoDLP-ToolUpdater', 'Accept': 'application/octet-stream'})
+    request = Request(url, headers={'User-Agent': 'BekoDLP-ToolUpdater', 'Accept': accept})
     count, chunks, digest = 0, [], hashlib.sha256()
     with build_opener(SecureRedirect()).open(request, timeout=20) as response:
         trusted_url(response.geturl())
@@ -118,7 +121,8 @@ def parse_release(component, data):
 
 def latest_release(component, cancel):
     repository = SPECS[component][0]
-    content = read_url(f'https://api.github.com/repos/{repository}/releases/latest', cancel=cancel, limit=2 * 1024 ** 2)
+    content = read_url(f'https://api.github.com/repos/{repository}/releases/latest', cancel=cancel,
+                       limit=2 * 1024 ** 2, accept='application/vnd.github+json')
     return parse_release(component, json.loads(content.decode('utf-8')))
 
 

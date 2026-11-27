@@ -21,7 +21,9 @@ import warnings
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from errors import MediaOperationError
-from utils import NO_WINDOW, DownloadCancelled, psutil, which_executable
+from process_utils import NO_WINDOW, psutil
+from errors import DownloadCancelled
+from runtime_tools import which_executable
 from cookie_options import validate_cookie_options
 from network_options import validate_network_options
 from process_tree import spawn_owned_process

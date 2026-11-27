@@ -16,7 +16,7 @@ from urllib.parse import quote, urlsplit
 
 from app_info import APP_EXECUTABLE, APP_VERSION, UPDATE_ASSET_NAME, UPDATE_REPOSITORY
 from package_layout import MANIFEST_NAME, parse_manifest, extract_package, file_sha256
-from utils import log_warning
+from app_logging import log_warning
 
 MAX_RELEASE_BYTES = 1024 * 1024
 MAX_UPDATE_BYTES = 1024 * 1024 * 1024

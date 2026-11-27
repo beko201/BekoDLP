@@ -54,9 +54,7 @@ def allowed_codecs(mode, container):
 def validate_output_options(data):
     if data.get('trim_download_mode', 'full') not in ('section', 'full'):
         raise ValueError('Unknown trim download mode.')
-    mode = data.get("output_mode", "legacy")
-    if mode == "legacy":
-        return
+    mode = data.get("output_mode", "video")
     if mode not in ("video", "audio"):
         raise ValueError("Unknown output mode.")
     if mode != "audio":

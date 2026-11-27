@@ -9,8 +9,10 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
+from output_compat import canonical_document, LEGACY_OUTPUT_KEYS
 from settings import QUALITIES, CODECS, _unique_object, _reject_constant, _finite_float
 from proxy_secrets import SecretProtectionError, protect_document, unprotect_document, has_plaintext_proxy
+from task_state import TaskState, state_of
 
 SCHEMA_VERSION = 1
 MAX_QUEUE_BYTES = 16 * 1024 * 1024
@@ -22,14 +24,14 @@ class UnsupportedQueueVersion(ValueError):
 
 
 def task_state(task, restarting=(), tid=None):
-    status = task['status']
-    if status.startswith('Completed'):
+    state = state_of(task)
+    if state == TaskState.COMPLETED:
         return 'completed'
     if task.get('id', tid) in restarting:
         return 'pending'
-    if status.startswith('Error'):
+    if state == TaskState.FAILED:
         return 'failed'
-    if status.startswith('Cancel'):
+    if state in (TaskState.CANCELLED, TaskState.CANCELLING):
         return 'cancelled'
     return 'pending'
 
@@ -71,11 +73,10 @@ def validate_document(document):
                        for value in options.values())):
             raise ValueError('Invalid saved task options.')
         try:
-            options = asdict(TaskOptions(**options))
+            options = canonical_document(asdict(TaskOptions(**options)))
         except TypeError as error:
             raise ValueError('Unknown saved task options.') from error
-        if (options['quality'] not in QUALITIES or options['format'] not in ('MP4', 'MP3')
-                or options['codec_mode'] not in CODECS):
+        if options['quality'] not in QUALITIES:
             raise ValueError('Invalid saved download profile.')
         title = row.get('title', '(resolving title...)')
         status = row.get('status', '')
@@ -114,8 +115,11 @@ class QueueStore:
                                   parse_constant=_reject_constant, parse_float=_finite_float)
             document = unprotect_document(original)
             result = validate_document(document)
-            if migrate and has_plaintext_proxy(original):
-                self._atomic_write(path, document)
+            legacy_options = any(LEGACY_OUTPUT_KEYS.intersection(row['options'])
+                                 or row['options'].get('output_mode') not in ('video', 'audio')
+                                 for row in document['tasks'])
+            if migrate and (has_plaintext_proxy(original) or legacy_options):
+                self._atomic_write(path, result)
             return result
         except RecursionError as error:
             raise ValueError('The saved queue has excessive nesting.') from error

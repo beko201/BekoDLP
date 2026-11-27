@@ -48,3 +48,7 @@ def managed_tool_path(name):
         return str(folder / (name + '.exe'))
     except (OSError, ValueError, TypeError, AttributeError):
         return None
+
+
+BASE_DIR = str(install_root())
+SETTINGS_FILE = str(install_root() / 'yd_settings.json')

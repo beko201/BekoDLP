@@ -6,7 +6,8 @@ import tempfile
 from chapter_options import EMBED_CHAPTER_EXTENSIONS, MAX_CHAPTERS, chapter_ranges
 from errors import MediaOperationError
 from media_probe import probe_duration
-from utils import DownloadCancelled, InsufficientDiskSpace, log_warning
+from errors import DownloadCancelled, InsufficientDiskSpace
+from app_logging import log_warning
 
 
 def _streams(probe):

@@ -1,5 +1,6 @@
 """Serializable subtitle choices shared by the UI and task snapshots."""
 import re
+from output_compat import normalize_output
 
 SUBTITLE_DEFAULTS = dict(subtitle_mode='none', subtitle_languages='tr,en', subtitle_auto='off', subtitle_format='srt')
 SUBTITLE_MODES = ('none', 'files', 'embed', 'both')
@@ -30,7 +31,7 @@ def validate_subtitle_options(data):
         raise ValueError('Invalid subtitle languages.')
     if selected['subtitle_mode'] != 'none':
         language_patterns(selected['subtitle_languages'])
-        audio = data.get('output_mode') == 'audio' or data.get('output_mode', 'legacy') == 'legacy' and data.get('format') == 'MP3'
+        audio = normalize_output(data)['output_mode'] == 'audio'
         if audio and selected['subtitle_mode'] in ('embed', 'both'):
             raise ValueError('Audio downloads support separate subtitle files only.')
     return selected

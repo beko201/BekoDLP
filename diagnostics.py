@@ -9,7 +9,10 @@ from importlib import metadata
 from pathlib import Path
 import tempfile
 
-import utils
+import app_logging
+import app_paths
+import process_utils
+import runtime_tools
 from app_info import APP_NAME, APP_VERSION
 
 
@@ -21,13 +24,13 @@ _SESSION_LOGGED = False
 
 
 def _tool_version(name, executable=None):
-    executable = executable if isinstance(executable, str) and executable else utils.which_executable([name])
+    executable = executable if isinstance(executable, str) and executable else runtime_tools.which_executable([name])
     if not executable:
         return 'unavailable (not found)'
     try:
         result = subprocess.run([executable, '--version' if name == 'deno' else '-version'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding='utf-8', errors='replace',
-                                timeout=TOOL_VERSION_TIMEOUT, **utils.NO_WINDOW)
+                                timeout=TOOL_VERSION_TIMEOUT, **process_utils.NO_WINDOW)
     except subprocess.TimeoutExpired:
         return 'unavailable (version check timed out)'
     except OSError as error:
@@ -68,7 +71,7 @@ def get_runtime_info(ffmpeg=None, ffprobe=None):
                              'yt-dlp': yt_version, 'PySide6': _package_version('PySide6'),
                              'FFmpeg': _tool_version('ffmpeg', ffmpeg),
                              'ffprobe': _tool_version('ffprobe', ffprobe),
-                             'Deno': _tool_version('deno', utils.portable_deno_path()),
+                             'Deno': _tool_version('deno', runtime_tools.portable_deno_path()),
                              'yt-dlp backend': 'external executable (bundled EJS)'}
         return dict(_RUNTIME_INFO)
 
@@ -79,7 +82,7 @@ def initialize_runtime_diagnostics(ffmpeg=None, ffprobe=None):
     info = get_runtime_info(ffmpeg, ffprobe)
     with _RUNTIME_LOCK:
         if not _SESSION_LOGGED:
-            _SESSION_LOGGED = utils.log_error('Application session started', level='INFO',
+            _SESSION_LOGGED = app_logging.log_error('Application session started', level='INFO',
                                              event='session_started', component='application',
                                              details=list(info.items()))
     return info
@@ -103,7 +106,7 @@ def mask_personal_paths(text, output_folders=()):
 
 
 def _report_text(value, output_folders=()):
-    return utils._log_text(mask_personal_paths(value, output_folders))
+    return app_logging._log_text(mask_personal_paths(value, output_folders))
 
 
 def build_diagnostic_report(details='', tasks=()):
@@ -113,12 +116,12 @@ def build_diagnostic_report(details='', tasks=()):
             output_folders.append(task['folder'])
         if isinstance(task.get('output_path'), str):
             output_folders.append(re.sub(r'[\\/][^\\/]+$', '', task['output_path']))
-    status = utils.get_log_status()
+    status = app_logging.get_log_status()
     sections = ['Video Downloader diagnostic report',
                 f'Generated: {datetime.now().astimezone().isoformat(timespec="seconds")}',
-                f'Session: {utils._SESSION_ID}',
+                f'Session: {app_logging._SESSION_ID}',
                 *[f'{key}: {value}' for key, value in get_runtime_info().items()],
-                utils.log_location_text(status)]
+                app_logging.log_location_text(status)]
     if details:
         sections.extend(['\nError details', _report_text(details, output_folders)])
     if tasks:
@@ -134,7 +137,7 @@ def build_diagnostic_report(details='', tasks=()):
     if path:
         try:
             # Rotation and writes use the same lock, so this snapshot is consistent.
-            with utils._LOG_LOCK, open(path, 'rb') as stream:
+            with app_logging._LOG_LOCK, open(path, 'rb') as stream:
                 stream.seek(0, os.SEEK_END)
                 size = stream.tell()
                 stream.seek(max(0, size - LOG_TAIL_BYTES))
@@ -150,9 +153,9 @@ def build_diagnostic_report(details='', tasks=()):
 def save_diagnostic_report(path, report):
     """Replace the chosen report atomically; leave an existing file intact on failure."""
     destination = Path(path)
-    status = utils.get_log_status()
+    status = app_logging.get_log_status()
     for source in (status['primary_path'], status['fallback_path'],
-                   utils.DEBUG_LOG_FILE, utils.FALLBACK_DEBUG_LOG_FILE, utils.SETTINGS_FILE):
+                   app_logging.DEBUG_LOG_FILE, app_logging.FALLBACK_DEBUG_LOG_FILE, app_paths.SETTINGS_FILE):
         source = Path(source).resolve()
         target = destination.resolve()
         if target == source or (target.parent == source.parent and

@@ -9,7 +9,8 @@ import tempfile
 from errors import MediaOperationError
 from media_probe import probe_duration
 from subtitle_options import select_languages, language_patterns, validate_subtitle_options
-from utils import DownloadCancelled, InsufficientDiskSpace, log_warning
+from errors import DownloadCancelled, InsufficientDiskSpace
+from app_logging import log_warning
 
 MAX_SUBTITLE_BYTES = 16 * 1024 ** 2
 _TIMES = re.compile(r'^(\d+:\d{2}:\d{2}[,.]\d{3})\s+-->\s+(\d+:\d{2}:\d{2}[,.]\d{3})(?:\s.*)?$')

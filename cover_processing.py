@@ -6,7 +6,8 @@ import tempfile
 from cover_options import SUPPORTED_COVER_EXTENSIONS, validate_cover_options
 from errors import MediaOperationError
 from media_probe import probe_duration
-from utils import DownloadCancelled, InsufficientDiskSpace, log_warning
+from errors import DownloadCancelled, InsufficientDiskSpace
+from app_logging import log_warning
 
 
 def artwork(stream):

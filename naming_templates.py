@@ -14,7 +14,7 @@ FORMATTER = Formatter()
 
 def safe_filename(value):
     # settings imports these defaults before utils finishes importing settings.
-    from utils import safe_filename as sanitize
+    from file_utils import safe_filename as sanitize
     return sanitize(value)
 
 

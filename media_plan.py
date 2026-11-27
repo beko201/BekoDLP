@@ -1,5 +1,5 @@
 """Immutable media descriptions and output decisions without file or process I/O."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 import re
@@ -115,6 +115,22 @@ def _video_args(encoder, quality):
     return ("-crf", str((24, 32, 40)[index]), "-b:v", "0", "-cpu-used", "6")
 
 
+def retry_output_plan(task, plan, encoders=None):
+    """Recover a failed remux using the same profile and downloaded streams."""
+    if plan.video.action != StreamAction.COPY or plan.audio.action not in (StreamAction.COPY, StreamAction.DROP):
+        return None
+    if task['container'] == 'auto' and plan.container != 'mkv':
+        return replace(plan, container='mkv', extension='mkv', preserve_original_file=False)
+    if task['container'] == 'mp4' and task['video_codec'] == 'h264':
+        if encoders is not None and 'libx264' not in encoders:
+            raise MediaOperationError('FFmpeg has no encoder for h264.')
+        video = replace(plan.video, action=StreamAction.ENCODE,
+                        encoder='libx264' if encoders is not None else None,
+                        options=_video_args('libx264', task['video_quality']))
+        return replace(plan, video=video, preserve_original_file=False)
+    return None
+
+
 def _stream_plan(source, target, task, encoders, depth=None):
     if not target:
         return StreamPlan(source, StreamAction.DROP, None)
@@ -178,7 +194,9 @@ def build_output_plan(task, sources, available_encoders=None):
     audio = next((s for s in sources.streams if s.kind == "audio"), None)
     if not audio_only and video is None:
         raise MediaOperationError("The source has no video stream. Choose Audio output.")
-    if (audio_only or want_audio not in ("original", "none")) and audio is None:
+    # Video codecs describe tracks that exist; a silent video stays silent.
+    # Audio-only output always requires an actual audio track.
+    if audio_only and audio is None:
         raise MediaOperationError("The requested output requires an audio stream, but the source has none.")
     source_video, source_audio = video.codec if video else "", audio.codec if audio else ""
     target_video = "" if audio_only else source_video if want_video == "original" else want_video

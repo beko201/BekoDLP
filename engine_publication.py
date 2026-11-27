@@ -3,11 +3,20 @@ import os
 import time
 import gc
 import shutil
+from engine_runtime import EngineRuntime
+from component_ports import EngineOperations, TaskOperations
 from naming_templates import ensure_naming_folder
-from utils import DownloadCancelled, remove_leftovers, log_error
+from errors import DownloadCancelled
+from file_utils import remove_leftovers
+from app_logging import log_error
 
 
-class MediaPublicationMixin:
+class MediaPublication:
+    def __init__(self, state: EngineRuntime, manager: TaskOperations, operations: EngineOperations):
+        self.state = state
+        self.manager = manager
+        self.operations = operations
+
     def _cleanup_workspace(self, work_dir, parent_folder):
         """Remove only our direct child workspace, retrying temporary filesystem locks."""
         target = os.path.realpath(os.path.abspath(work_dir))
@@ -34,26 +43,26 @@ class MediaPublicationMixin:
 
     def _release_output_reservation(self, path, tid):
         key = os.path.normcase(os.path.realpath(os.path.abspath(path)))
-        with self.resource_lock:
-            if self.reserved_output_paths.get(key) == tid:
-                del self.reserved_output_paths[key]
+        with self.state.resource_lock:
+            if self.state.reserved_output_paths.get(key) == tid:
+                del self.state.reserved_output_paths[key]
 
     def _record_subtitle_start(self, tid, start):
-        with self.resource_lock:
-            self._subtitle_context.setdefault(tid, {})['start'] = max(0, start or 0)
+        with self.state.resource_lock:
+            self.state._subtitle_context.setdefault(tid, {})['start'] = max(0, start or 0)
 
     def _publish_output(self, tid, source, output_folder, *, apply_naming=True):
         task = self.manager.get_task(tid) or {}
-        with self.resource_lock:
-            naming = self._output_naming.get(tid)
-            state = dict(self._subtitle_context.get(tid, {}))
+        with self.state.resource_lock:
+            naming = self.state._output_naming.get(tid)
+            state = dict(self.state._subtitle_context.get(tid, {}))
         def finalize_media():
             if task.get('chapter_mode', 'none') == 'embed':
                 from chapter_processing import ChapterProcessor
-                ChapterProcessor(self).embed(tid, source, state.get('metadata'), state.get('start', 0))
+                ChapterProcessor(self.operations).embed(tid, source, state.get('metadata'), state.get('start', 0))
             if task.get('embed_cover', 'off') == 'on':
                 from cover_processing import CoverProcessor
-                CoverProcessor(self).prepare(tid, source, state.get('metadata'))
+                CoverProcessor(self.operations).prepare(tid, source, state.get('metadata'))
         filename_options = {}
         bundle_options = {}
         if naming and apply_naming:
@@ -63,15 +72,15 @@ class MediaPublicationMixin:
             bundle_options['stem'] = stem
         if task.get('subtitle_mode', 'none') == 'none':
             finalize_media()
-            return self._publish_media_file(tid, source, output_folder, **filename_options)
+            return self.operations._publish_media_file(tid, source, output_folder, **filename_options)
         from subtitle_processing import SubtitleProcessor, publish_bundle
-        with self.resource_lock:
-            state = dict(self._subtitle_context.get(tid, {}))
-        with SubtitleProcessor(self).prepare(tid, source, state.get('metadata'), state.get('start', 0)) as sidecars:
+        with self.state.resource_lock:
+            state = dict(self.state._subtitle_context.get(tid, {}))
+        with SubtitleProcessor(self.operations).prepare(tid, source, state.get('metadata'), state.get('start', 0)) as sidecars:
             finalize_media()
             if sidecars:
-                return publish_bundle(self, tid, source, output_folder, sidecars, **bundle_options)
-            return self._publish_media_file(tid, source, output_folder, **filename_options)
+                return publish_bundle(self.operations, tid, source, output_folder, sidecars, **bundle_options)
+            return self.operations._publish_media_file(tid, source, output_folder, **filename_options)
 
     def _publish_media_file(self, tid, source, output_folder, *, filename=None):
         """Publish a completed output without overwriting any existing destination."""
@@ -83,7 +92,7 @@ class MediaPublicationMixin:
         while True:
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
-            destination = self._dedupe_path(desired, tid)
+            destination = self.operations._dedupe_path(desired, tid)
             created = False
             try:
                 try:
@@ -94,7 +103,7 @@ class MediaPublicationMixin:
                     raise
                 except OSError:
                     # Use exclusive creation when hard links are unavailable to preserve existing files.
-                    self._check_disk_space(output_folder, os.path.getsize(source))
+                    self.operations._check_disk_space(output_folder, os.path.getsize(source))
                     with open(destination, "xb") as output:
                         created = True
                         with open(source, "rb") as input_file:
@@ -114,7 +123,7 @@ class MediaPublicationMixin:
                 self.manager.report_stage_progress(tid, "publishing", 1)
                 return destination
             except FileExistsError:
-                self._release_output_reservation(destination, tid)
+                self.operations._release_output_reservation(destination, tid)
                 if created:
                     remove_leftovers(output_folder, lambda n: n == os.path.basename(destination))
                     raise
@@ -122,7 +131,7 @@ class MediaPublicationMixin:
             except BaseException:
                 if created:
                     remove_leftovers(output_folder, lambda n: n == os.path.basename(destination))
-                self._release_output_reservation(destination, tid)
+                self.operations._release_output_reservation(destination, tid)
                 raise
 
     def _dedupe_path(self, path, tid):
@@ -131,16 +140,16 @@ class MediaPublicationMixin:
         candidate = path
         suffix = 0
 
-        with self.resource_lock:
+        with self.state.resource_lock:
             while True:
                 key = os.path.normcase(
                     os.path.realpath(os.path.abspath(candidate))
                 )
                 if (
                     not os.path.lexists(candidate)
-                    and key not in self.reserved_output_paths
+                    and key not in self.state.reserved_output_paths
                 ):
-                    self.reserved_output_paths[key] = tid
+                    self.state.reserved_output_paths[key] = tid
                     return candidate
 
                 suffix += 1

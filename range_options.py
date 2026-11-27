@@ -12,7 +12,7 @@ def parse_ranges(text):
     if len(lines) > MAX_RANGES:
         raise ValueError('At most 100 time ranges are supported.')
     # Import at call time: utils imports preference defaults from settings.
-    from utils import validate_trim_range
+    from time_utils import validate_trim_range
     result = []
     for number, line in enumerate(lines, 1):
         match = re.fullmatch(r'([0-9:.]+)\s*[-–]\s*([0-9:.]+)', line)
@@ -28,8 +28,6 @@ def validate_range_options(data):
     if ranges:
         if data.get('trim_start') or data.get('trim_end'):
             raise ValueError('Use either a single trim range or multiple time ranges.')
-        if data.get('output_mode') == 'legacy':
-            raise ValueError('Multiple time ranges require a video or audio output profile.')
         if data.get('chapter_mode', 'none') == 'split':
             raise ValueError('Use either multiple time ranges or separate chapter files. Chapter embedding can be combined with ranges.')
     return ranges

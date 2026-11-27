@@ -8,7 +8,10 @@ import download_engine
 from cookie_options import cookie_kwargs
 from network_options import network_kwargs
 from naming_templates import playlist_naming_context
-from utils import DownloadCancelled, _check_cancelled, normalize_url, log_warning
+from errors import DownloadCancelled
+from download_support import _check_cancelled
+from url_utils import normalize_url
+from app_logging import log_warning
 
 MAX_PREVIEW_ENTRIES = 20000
 

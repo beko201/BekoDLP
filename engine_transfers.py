@@ -5,64 +5,70 @@ import threading
 import traceback
 import tempfile
 from contextvars import copy_context
+from engine_runtime import EngineRuntime
+from component_ports import EngineOperations, TaskOperations
+from task_state import TaskState, state_of
 from ytdlp_process import YtDlpProcess
 from errors import MediaOperationError
 from cookie_options import cookie_selection
 from network_options import network_selection
-from utils import (
-    DownloadCancelled,
-    _check_cancelled,
-    _network_options,
-    safe_filesize,
-    validate_trim_range,
-    remove_leftovers,
-    part_matcher,
-    log_warning,
-)
+from errors import DownloadCancelled
+from download_support import _check_cancelled, _network_options
+from file_utils import safe_filesize, remove_leftovers, part_matcher
+from time_utils import validate_trim_range
+from app_logging import log_warning
 from engine_metadata import _is_expired_media_error
 
 
-class MediaTransferMixin:
+class MediaTransfers:
+    def __init__(self, state: EngineRuntime, manager: TaskOperations, operations: EngineOperations):
+        self.state = state
+        self.manager = manager
+        self.operations = operations
+
     def ytdlp_process(self, options, tid, *, stop_event=None, folder=None):
         paused_status = None
+        paused_state = None
         def check():
             _check_cancelled(stop_event)
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
 
         def tick():
-            nonlocal paused_status
+            nonlocal paused_status, paused_state
             task = self.manager.get_task(tid) or {}
             if self.manager.paused and paused_status is None:
                 paused_status = task.get('status', 'Downloading')
-                self.manager.update_task(tid, status='Paused')
+                paused_state = state_of(task)
+                self.manager.update_task(tid, state=TaskState.PAUSED, status='Paused')
             elif not self.manager.paused and paused_status is not None:
-                if task.get('status') == 'Paused':
-                    self.manager.update_task(tid, status=paused_status)
+                if state_of(task) == TaskState.PAUSED:
+                    self.manager.update_task(tid, state=paused_state, status=paused_status)
                 paused_status = None
+                paused_state = None
             if folder:
-                self._check_disk_space(folder, 0)
+                self.operations._check_disk_space(folder, 0)
 
         options = dict(options)
         task = self.manager.get_task(tid)
         options.update(cookie_selection(task))
         options.update(network_selection(task))
         if options['download_rate']:
-            options['download_rate'] = str(max(1, int(options['download_rate']) // self._rate_divisor.get()))
+            options['download_rate'] = str(max(1, int(options['download_rate']) // self.state._rate_divisor.get()))
             options['concurrent_fragment_downloads'] = 1
-        options['ffmpeg_threads'] = self.processing_limits.thread_budget()
-        if self.ffmpeg:
-            options.setdefault('ffmpeg_location', self.ffmpeg)
+        options['ffmpeg_threads'] = self.state.processing_limits.thread_budget()
+        if self.state.ffmpeg:
+            options.setdefault('ffmpeg_location', self.state.ffmpeg)
         return YtDlpProcess(options, check=check, is_paused=lambda: self.manager.paused,
-                            on_start=self._register_process, on_finish=self._unregister_process,
+                            on_start=self.operations._register_process, on_finish=self.operations._unregister_process,
                             on_tick=tick)
 
     def media_download_session(self, tid, *, streams=1, fragmented=True, stop_event=None):
         if (self.manager.get_task(tid) or {}).get('download_rate'):
             fragmented = False
-        return self.network_limits.session(
-            lambda: self._wait_for_download_resume(tid, stop_event=stop_event),
-            lambda: self.manager.update_task(tid, status="Waiting for download connection slot"),
+        return self.state.network_limits.session(
+            lambda: self.operations._wait_for_download_resume(tid, stop_event=stop_event),
+            lambda: self.manager.update_task(tid, state=TaskState.WAITING, status="Waiting for download connection slot"),
             streams=streams, fragmented=fragmented)
 
     def _wait_for_download_resume(self, tid, *, stop_event=None):
@@ -75,7 +81,7 @@ class MediaTransferMixin:
             if not self.manager.paused:
                 return
             if not notified:
-                self.manager.update_task(tid, status="Paused")
+                self.manager.update_task(tid, state=TaskState.PAUSED, status="Paused")
                 notified = True
             time.sleep(0.1)
 
@@ -84,7 +90,7 @@ class MediaTransferMixin:
         _check_cancelled(cancel_event)
         _check_cancelled(stop_event)
         if tid is not None:
-            self._wait_for_download_resume(tid, stop_event=stop_event)
+            self.operations._wait_for_download_resume(tid, stop_event=stop_event)
         info, generation = media_info.snapshot(format_id) if media_info else (None, None)
         if info is None:
             if tid is not None and self.manager.get_task(tid).get('source_selection', 'auto') == 'manual':
@@ -102,7 +108,7 @@ class MediaTransferMixin:
             # Refresh once, shared by both streams. Preserve the original format
             # selection; an expired URL must never lift the resolution limit.
             if tid is not None:
-                self._wait_for_download_resume(tid, stop_event=stop_event)
+                self.operations._wait_for_download_resume(tid, stop_event=stop_event)
             media_info.refresh(generation, cancel_event, stop_event)
             refreshed, _ = media_info.snapshot(format_id)
             if refreshed is None:
@@ -110,7 +116,7 @@ class MediaTransferMixin:
             _check_cancelled(cancel_event)
             _check_cancelled(stop_event)
             if tid is not None:
-                self._wait_for_download_resume(tid, stop_event=stop_event)
+                self.operations._wait_for_download_resume(tid, stop_event=stop_event)
             return ydl.process_ie_result(refreshed, download=True)
 
     def _download_format(self, tid, stream_key, source_url, yt_format, filename, *, folder, stop_event=None):
@@ -134,7 +140,7 @@ class MediaTransferMixin:
                 finished = d.get('status') == 'finished'
                 downloaded = d.get('downloaded_bytes') or 0
                 total = downloaded if finished else d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-                self._check_download_disk_space(tid, folder, downloaded, total)
+                self.operations._check_download_disk_space(tid, folder, downloaded, total)
                 self.manager.report_progress(tid, stream_key, downloaded, total, force=finished)
 
         ydl_opts = {
@@ -157,14 +163,14 @@ class MediaTransferMixin:
             if worker_id is None:
                 raise RuntimeError("No worker was assigned to the download")
             _check_cancelled(cancel_event)
-            self._wait_for_download_resume(tid, stop_event=stop_event)
+            self.operations._wait_for_download_resume(tid, stop_event=stop_event)
             ydl_opts.update(_network_options(cancel_event, stop_event=stop_event))
             protocol = getattr(yt_format, 'protocol', '')
             fragmented = not protocol or any(kind in protocol for kind in ('m3u8', 'dash_segments', 'ism'))
-            with self.media_download_session(tid, fragmented=fragmented, stop_event=stop_event) as network:
+            with self.operations.media_download_session(tid, fragmented=fragmented, stop_event=stop_event) as network:
                 ydl_opts.update(network)
-                with self.ytdlp_process(ydl_opts, tid, stop_event=stop_event, folder=folder) as ydl:
-                    self._download_from_info(ydl, source_url, getattr(yt_format, '_media_info', None),
+                with self.operations.ytdlp_process(ydl_opts, tid, stop_event=stop_event, folder=folder) as ydl:
+                    self.operations._download_from_info(ydl, source_url, getattr(yt_format, '_media_info', None),
                                              cancel_event, format_id=yt_format.format_id, stop_event=stop_event, tid=tid)
             check_cancelled()
         except BaseException as e:
@@ -202,9 +208,9 @@ class MediaTransferMixin:
         }
 
         def _dl(key, stream, filename):
-            token = self._rate_divisor.set(2)
+            token = self.state._rate_divisor.set(2)
             try:
-                path = self._download_format(tid, key, source_url, stream, filename,
+                path = self.operations._download_format(tid, key, source_url, stream, filename,
                                              folder=folder, stop_event=stop_event)
                 with state_lock:
                     results[key] = path
@@ -216,7 +222,7 @@ class MediaTransferMixin:
                     stop_event.set()
 
             finally:
-                self._rate_divisor.reset(token)
+                self.state._rate_divisor.reset(token)
 
         t_video = threading.Thread(target=copy_context().run,
                                    args=(_dl, "video", video_stream, video_filename), daemon=True)
@@ -254,11 +260,11 @@ class MediaTransferMixin:
         output_folder = folder if output_folder is None else output_folder
         work_dir = tempfile.mkdtemp(prefix=f".yd-{tid}-", dir=folder)
         try:
-            return self._complete_via_selector_in_workspace(
+            return self.operations._complete_via_selector_in_workspace(
                 tid, worker_id, url, title_safe, raw_title, fmt, target_height, force_h264,
                 trim_start, trim_end, folder=work_dir, output_folder=output_folder, media_info=media_info)
         finally:
-            self._cleanup_workspace(work_dir, folder)
+            self.operations._cleanup_workspace(work_dir, folder)
 
     def _complete_via_selector_in_workspace(self, tid, worker_id, url, title_safe, raw_title, fmt,
                                             target_height, force_h264, trim_start, trim_end, *, folder,
@@ -270,10 +276,10 @@ class MediaTransferMixin:
         """
         self.manager.set_log_stage(tid, 'download')
         validate_trim_range(trim_start, trim_end)
-        if not self.ffmpeg or not self.ffprobe:
+        if not self.state.ffmpeg or not self.state.ffprobe:
             raise MediaOperationError("ffmpeg/ffprobe were not found; processing is unavailable")
 
-        self._check_disk_space(folder, 0)
+        self.operations._check_disk_space(folder, 0)
         audio_only = (fmt == "MP3")
         prefix = f"{title_safe}_{tid}"
         outtmpl = os.path.join(folder, prefix + ".%(ext)s")
@@ -295,7 +301,7 @@ class MediaTransferMixin:
                 key = (d.get('info_dict') or {}).get('format_id') or d.get('filename') or 'sel'
                 downloaded = d.get('downloaded_bytes') or 0
                 total = downloaded if finished else d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-                self._check_download_disk_space(tid, folder, downloaded, total)
+                self.operations._check_download_disk_space(tid, folder, downloaded, total)
                 self.manager.report_progress(tid, key, downloaded, total, force=finished)
 
         def pp_hook(d):
@@ -317,8 +323,8 @@ class MediaTransferMixin:
             'noprogress': True,
             'merge_output_format': 'mp4/mkv',
         }
-        if self.ffmpeg and os.path.isabs(self.ffmpeg):
-            ydl_opts['ffmpeg_location'] = self.ffmpeg
+        if self.state.ffmpeg and os.path.isabs(self.state.ffmpeg):
+            ydl_opts['ffmpeg_location'] = self.state.ffmpeg
         cancel_event = self.manager.task_control(tid)[0]
         _check_cancelled(cancel_event)
         ydl_opts.update(_network_options(cancel_event))
@@ -334,11 +340,11 @@ class MediaTransferMixin:
 
         failed = None
         try:
-            self._wait_for_download_resume(tid)
-            with self.media_download_session(tid, streams=1 if audio_only else 2) as network:
+            self.operations._wait_for_download_resume(tid)
+            with self.operations.media_download_session(tid, streams=1 if audio_only else 2) as network:
                 ydl_opts.update(network)
-                with self.ytdlp_process(ydl_opts, tid, folder=folder) as ydl:
-                    info = self._download_from_info(ydl, url, media_info, cancel_event, tid=tid)
+                with self.operations.ytdlp_process(ydl_opts, tid, folder=folder) as ydl:
+                    info = self.operations._download_from_info(ydl, url, media_info, cancel_event, tid=tid)
             if (info or {}).get("duration"):
                 self.manager.update_metadata(tid, duration=info["duration"])
 
@@ -361,30 +367,30 @@ class MediaTransferMixin:
                 raise DownloadCancelled()
 
             if audio_only:
-                out = self._dedupe_path(os.path.join(folder, f"{title_safe}.mp3"), tid)
+                out = self.operations._dedupe_path(os.path.join(folder, f"{title_safe}.mp3"), tid)
                 cleanup.append(out)
-                self.manager.update_task(tid, status=f"Worker{worker_id}: Converting")
-                self._ffmpeg_convert_to_mp3(tid, worker_id, src, out)
+                self.manager.update_task(tid, state=TaskState.RUNNING, status=f"Worker{worker_id}: Converting")
+                self.operations._ffmpeg_convert_to_mp3(tid, worker_id, src, out)
                 if self.manager.is_cancelled(tid):
                     raise DownloadCancelled()
                 try:
                     os.remove(src)
                 except Exception as error:
                     log_warning("Could not remove the temporary source", error, [("task", tid), ("file", src)], once_key=("source_cleanup", tid))
-                out = self._maybe_trim(tid, worker_id, out, trim_start, trim_end)
+                out = self.operations._maybe_trim(tid, worker_id, out, trim_start, trim_end)
                 label = "MP3"
             else:
                 ext = os.path.splitext(src)[1].lstrip('.').lower() or 'mp4'
                 if force_h264:
                     ext = 'mp4'
-                out = self._dedupe_path(os.path.join(folder, f"{title_safe}.{ext}"), tid)
+                out = self.operations._dedupe_path(os.path.join(folder, f"{title_safe}.{ext}"), tid)
                 cleanup.append(out)
-                self._replace_media(src, out)
+                self.operations._replace_media(src, out)
                 label = "MP4/H.264" if force_h264 else ext.upper()
-                out = self._maybe_trim(tid, worker_id, out, trim_start, trim_end)
+                out = self.operations._maybe_trim(tid, worker_id, out, trim_start, trim_end)
                 if force_h264:
-                    self._ensure_h264_compatible(tid, worker_id, out)
-            out = self._publish_output(tid, out, output_folder)
+                    self.operations._ensure_h264_compatible(tid, worker_id, out)
+            out = self.operations._publish_output(tid, out, output_folder)
         except BaseException as e:
             try:
                 traceback.clear_frames(e.__traceback__)
@@ -395,5 +401,5 @@ class MediaTransferMixin:
             purge()  # Clean up outside the exception handler after releasing traceback-held files.
             raise failed
 
-        self.manager.update_task(tid, status=f"Completed ({label})", progress=100, output_path=out)
+        self.manager.update_task(tid, state=TaskState.COMPLETED, status=f"Completed ({label})", progress=100, output_path=out)
         self.manager.notify(f"{raw_title} downloaded ({label}).")

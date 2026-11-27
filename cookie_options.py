@@ -3,6 +3,18 @@ import os
 
 COOKIE_BROWSERS = ('chrome', 'edge', 'firefox', 'brave', 'opera', 'vivaldi', 'chromium', 'whale', 'safari')
 COOKIE_DEFAULTS = dict(cookie_mode='none', cookie_file='', cookie_browser='chrome', cookie_profile='')
+BROWSER_COOKIE_COPY_HELP = (
+    'The browser cookie database could not be read. Close the browser completely, '
+    'including background processes, and retry. If it still fails, choose Cookie file '
+    'and select a Netscape cookies.txt file.')
+
+
+def cookie_error_guidance(message):
+    """Recognize cookie-copy failures without changing authentication settings."""
+    message = str(message).lower()
+    if 'could not copy' in message and 'cookie database' in message:
+        return BROWSER_COOKIE_COPY_HELP
+    return ''
 
 
 def cookie_selection(data=None):

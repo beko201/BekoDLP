@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict, field
 from queue import Queue
 from typing import Optional
 from media_options import validate_output_options
+from output_compat import normalize_output, output_aliases
 from cookie_options import validate_cookie_options
 from subtitle_options import validate_subtitle_options
 from network_options import validate_network_options
@@ -12,7 +13,7 @@ from cover_options import validate_cover_options
 from chapter_options import validate_chapter_options
 from range_options import validate_range_options
 from source_formats import validate_source_options
-from utils import validate_trim_range
+from time_utils import validate_trim_range
 
 
 LINK_RESOLVER_WORKERS = 3
@@ -39,14 +40,14 @@ PROGRESS_STAGES = {
 @dataclass(frozen=True)
 class TaskOptions:
     folder: str
-    format: str = "MP4"
+    format: str | None = None
     quality: str = "1080p"
-    codec_mode: str = "Original (Automatic)"
-    mp3_bitrate: str = "192k"
+    codec_mode: str | None = None
+    mp3_bitrate: str | None = None
     trim_start: str = ""
     trim_end: str = ""
     trim_download_mode: str = 'full'
-    output_mode: str = "legacy"  # Preserve the existing headless API; the UI submits an explicit mode.
+    output_mode: str = ""  # Empty only at the legacy API boundary; normalized immediately.
     container: str = "auto"
     video_codec: str = "original"
     audio_codec: str = "original"
@@ -76,10 +77,11 @@ class TaskOptions:
     trim_ranges: str = ''
 
     def __post_init__(self):
+        normalized = normalize_output(asdict(self))
+        for key, value in {**normalized, **output_aliases(normalized)}.items():
+            object.__setattr__(self, key, value)
         validate_trim_range(self.trim_start, self.trim_end)
         validate_output_options(asdict(self))
-        if self.trim_download_mode == 'section' and (self.trim_start or self.trim_end) and self.output_mode == 'legacy':
-            raise ValueError('Section downloading requires an explicit video or audio output profile.')
         validate_cookie_options(asdict(self))
         validate_subtitle_options(asdict(self))
         validate_network_options(asdict(self))
@@ -88,8 +90,6 @@ class TaskOptions:
         validate_cover_options(asdict(self))
         validate_chapter_options(asdict(self))
         validate_range_options(asdict(self))
-        if self.chapter_mode != 'none' and self.output_mode == 'legacy':
-            raise ValueError('Chapter processing requires an explicit video or audio output profile.')
         if self.cookie_file:
             object.__setattr__(self, 'cookie_file', os.path.abspath(self.cookie_file))
         object.__setattr__(self, "folder", os.path.abspath(self.folder) if self.folder else "")

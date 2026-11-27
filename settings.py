@@ -17,6 +17,9 @@ from chapter_options import CHAPTER_DEFAULTS
 from range_options import RANGE_DEFAULTS, parse_ranges
 from media_options import OUTPUT_DEFAULTS, AUDIO_BIT_DEPTHS, AUDIO_BITRATES, VIDEO_CODECS, AUDIO_CODECS, CONTAINERS, validate_output_options
 
+from output_compat import (normalize_output, output_aliases, normalize_changes, canonical_document,
+                           LEGACY_BITRATES, LEGACY_CODECS, HISTORICAL_CODEC_LABELS, legacy_preference_issues)
+
 SCHEMA_VERSION = 1
 MAX_WORKERS = 16
 MAX_VIDEO_WORKERS = 4
@@ -25,15 +28,13 @@ MAX_FRAGMENT_DOWNLOADS = 4
 MAX_NETWORK_CONNECTIONS = 32
 MAX_SETTINGS_BYTES = 1024 * 1024
 QUALITIES = ("144p", "240p", "360p", "480p", "720p", "1080p", "1440p(2K)", "2160p(4K)")
-BITRATES = ("128k", "192k", "256k", "320k")
-CODECS = ("Original (Automatic)", "H.264 (Compatibility)")
-# Accept historical labels so existing preferences retain their codec selection.
-_LEGACY_CODECS = {"Orijinal (Otomatik)": CODECS[0], "H.264 (Uyumluluk)": CODECS[1]}
+BITRATES = LEGACY_BITRATES
+CODECS = LEGACY_CODECS
+_LEGACY_CODECS = HISTORICAL_CODEC_LABELS
 DEFAULTS = dict(schema_version=SCHEMA_VERSION, language='en', last_folder="", workers=3,
                 video_workers=1, ffmpeg_threads=0,
                 fragment_downloads=1, network_connections=8,
-                mp3_bitrate="192k", format="MP4", quality="1080p",
-                codec_mode=CODECS[0], log_max_bytes=5 * 1024 * 1024,
+                quality="1080p", log_max_bytes=5 * 1024 * 1024,
                 log_backup_count=3, log_repeat_seconds=60)
 DEFAULTS.update(OUTPUT_DEFAULTS)
 DEFAULTS.update(NAMING_DEFAULTS)
@@ -64,28 +65,11 @@ def validate_settings(data):
         result = deepcopy(data)  # Preserve unknown fields without sharing nested mutable values.
     except RecursionError as error:
         raise ValueError('The settings data has excessive nesting.') from error
-    if "output_mode" not in data:
-        # Migrate older saved MP3/H.264 choices, without rewriting the file at load time.
-        if data.get("format") == "MP3":
-            result.update(output_mode="audio", container="mp3", audio_codec="mp3")
-        elif isinstance(data.get("codec_mode"), str) and _LEGACY_CODECS.get(data.get("codec_mode"), data.get("codec_mode")) == CODECS[1]:
-            result.update(output_mode="video", container="mp4", video_codec="h264", audio_codec="aac")
-    # Removed UI choices retain their nearest compatible profile on load.
-    if result.get("output_mode") == "automatic":
-        result["output_mode"] = "video"
-    if result.get("container") == "aac":
-        result["container"] = "m4a"
-    elif result.get("container") == "ogg":
-        audio_codec = result.get('audio_codec')
-        result["container"] = {"opus": "opus", "flac": "flac"}.get(audio_codec, "auto") if isinstance(audio_codec, str) else 'auto'
-    if result.get("audio_codec") in ("pcm_s16le", "pcm_s24le"):
-        result.setdefault("audio_bit_depth", "16" if result["audio_codec"] == "pcm_s16le" else "24")
-        result["audio_codec"] = "lpcm"
-    issues = []
+    result.update(normalize_output(result, preferences=True))
+    issues = legacy_preference_issues(data)
     choices = {"language": ('en', 'tr'), 'chapter_mode': ('none', 'embed', 'split'), 'embed_cover': ('off', 'on'), 'trim_download_mode': ('section', 'full'), 'subtitle_mode': SUBTITLE_MODES, 'subtitle_auto': ('off', 'on'),
                'subtitle_format': ('srt', 'vtt'), "cookie_mode": ('none', 'file', 'browser'),
-               "cookie_browser": COOKIE_BROWSERS, "format": ("MP4", "MP3"), "quality": QUALITIES,
-               "mp3_bitrate": BITRATES, "codec_mode": CODECS,
+               "cookie_browser": COOKIE_BROWSERS, "quality": QUALITIES,
                "output_mode": ("video", "audio"), "container": tuple(CONTAINERS),
                "video_codec": tuple(VIDEO_CODECS), "audio_codec": tuple(AUDIO_CODECS),
                "audio_bit_depth": AUDIO_BIT_DEPTHS, "audio_bitrate": AUDIO_BITRATES, "video_quality": ("high", "balanced", "small")}
@@ -95,10 +79,6 @@ def validate_settings(data):
               "log_backup_count": (1, 10), "log_repeat_seconds": (1, 3600)}
     for key, default in DEFAULTS.items():
         value = result.get(key, default)
-        if key == "audio_bitrate" and key not in data:
-            value = data.get("mp3_bitrate", default)
-        if key == "codec_mode" and isinstance(value, str):
-            value = _LEGACY_CODECS.get(value, value)
         valid = True
         if key in choices:
             valid = isinstance(value, str) and value in choices[key]
@@ -150,7 +130,7 @@ def validate_settings(data):
     result['saved_profiles'], invalid_profiles = recover_profiles(result['saved_profiles'])
     if invalid_profiles:
         issues.append('saved_profiles')
-    return result, issues
+    return canonical_document(result), issues
 
 
 def _unique_object(pairs):
@@ -195,13 +175,13 @@ def _read(path, *, migrate=False):
         raise ValueError('The settings data has excessive nesting.') from error
     result = validate_settings(document)
     if migrate and plaintext:
-        _atomic_write(path, document)
+        _atomic_write(path, result[0])
     return result
 
 
 def _serialize(data):
     try:
-        content = json.dumps(protect_document(data), ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+        content = json.dumps(protect_document(canonical_document(data)), ensure_ascii=False, indent=2, allow_nan=False) + '\n'
     except SecretProtectionError:
         raise
     except (TypeError, ValueError, RecursionError) as error:
@@ -282,7 +262,7 @@ class SettingsStore:
     def save(self, changes):
         if not self.writable:
             return False
-        data, issues = validate_settings({**self.data, **changes})
+        data, issues = validate_settings({**self.data, **normalize_changes(changes, self.data)})
         if issues:
             raise ValueError("Invalid preferences: " + ", ".join(issues))
         try:
@@ -300,10 +280,10 @@ class SettingsStore:
             previous = None
         if previous is not None:
             # Retain edits made on disk to fields this save did not change.
-            data, issues = validate_settings({**previous, **changes})
+            data, issues = validate_settings({**previous, **normalize_changes(changes, previous)})
             if issues:
                 raise ValueError('Invalid preferences: ' + ', '.join(issues))
-            if previous_original == data and not previous_issues and not has_plaintext_proxy(previous_raw):
+            if previous_original == canonical_document(data) and not previous_issues and not has_plaintext_proxy(previous_raw):
                 self.data = data
                 return False
             _serialize(data)  # Reject unsafe updates before replacing either runtime file.

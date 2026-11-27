@@ -2,7 +2,7 @@
 
 An independent Windows app for downloading videos, audio, and playlists from YouTube and other sites supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp). Choose your output format, trim clips, and manage downloads through an English or Turkish interface.
 
-The current source version is **1.1.1**. The portable application targets **Windows x64**.
+The current source version is **1.2**. The portable application targets **Windows x64**.
 BekoDLP uses yt-dlp for downloading and FFmpeg for media processing, with a
 PySide6/Qt interface. It is not affiliated with the yt-dlp project.
 
@@ -57,6 +57,8 @@ Choose **Language → Türkçe** to switch to Turkish. Language and output prefe
 
 **Original** preserves matching source codecs; **Automatic** selects a compatible
 container. Quality and bitrate settings apply when conversion is needed.
+Video output preserves silent sources without adding an audio track. Audio-only
+output requires an audio stream.
 Output choices are captured when tasks are added; changing defaults does not
 change existing tasks.
 

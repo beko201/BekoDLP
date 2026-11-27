@@ -9,7 +9,9 @@ import traceback
 from media_options import canonical_codec, resolution_height
 from media_plan import MediaSources, SourceStream, read_bit_depth
 from media_probe import probe_duration
-from utils import DownloadCancelled, _check_cancelled, _network_options, safe_filesize
+from errors import DownloadCancelled
+from download_support import _check_cancelled, _network_options
+from file_utils import safe_filesize
 from errors import MediaOperationError
 from source_formats import selected_sources
 
@@ -126,7 +128,7 @@ class SourcePreparer:
         if section:
             probe = self.engine._ffprobe_media(paths[0])
             origin = float(probe['format'].get('start_time') or 0)
-            from utils import validate_trim_range
+            from time_utils import validate_trim_range
             start, end = validate_trim_range(task.get('trim_start', ''), task.get('trim_end', ''))
             if not math.isfinite(origin) or origin < -.1 or origin > (start or 0) + .1:
                 raise MediaOperationError('The section timeline could not be verified. Select full download and trim.')
@@ -173,6 +175,15 @@ class SourcePreparer:
     def download_sources(self, tid, worker, url, info, selection, task, folder):
         if not selection:
             return (self._selector(tid, worker, url, info, task, folder),)
+        source_bytes = sum(safe_filesize(stream) for stream in selection)
+        if task['output_mode'] == 'audio' and task['audio_codec'] == 'mp3':
+            output_bytes = self.engine._estimate_mp3_bytes(tid, source_bytes)
+        else:
+            encode_video = task['output_mode'] == 'video' and task['video_codec'] != 'original' and any(
+                not stream.only_audio and canonical_codec(stream.video_codec) != task['video_codec']
+                for stream in selection)
+            output_bytes = source_bytes * (4 if encode_video else 1.1)
+        self.engine._check_disk_space(folder, source_bytes, output_bytes=output_bytes)
         if len(selection) == 2:
             video, audio = selection
             self.engine._check_disk_space(folder, safe_filesize(video) + safe_filesize(audio))
@@ -187,6 +198,8 @@ class SourcePreparer:
 
     def inspect_sources(self, paths, duration):
         probes = [self.engine._ffprobe_media(str(path)) for path in paths]
+        if len(probes) == 2 and not any(stream.get('codec_type') == 'audio' for stream in probes[1]['streams']):
+            raise MediaOperationError('The selected audio source contains no audio stream.')
         duration = probe_duration(probes[0]) or duration or 0
         streams = tuple(SourceStream(
             input_number, stream["index"], stream.get("codec_type", ""), canonical_codec(stream.get("codec_name")),

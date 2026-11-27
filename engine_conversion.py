@@ -6,58 +6,67 @@ import json
 import time
 import shutil
 from contextlib import contextmanager
+from engine_runtime import EngineRuntime
+from component_ports import EngineOperations, TaskOperations
+from task_state import TaskState
+from output_compat import normalize_output
+from media_options import AUTOMATIC_AUDIO_BITRATES
 from media_probe import MediaProbeCache, probe_duration
 from errors import MediaOperationError
-from utils import (
-    DownloadCancelled,
-    InsufficientDiskSpace,
-    DISK_HEADROOM_BYTES,
-    validate_trim_range,
-    run_cmd_capture,
-    log_warning,
-)
+from errors import DownloadCancelled, InsufficientDiskSpace
+from download_support import DISK_HEADROOM_BYTES
+from time_utils import validate_trim_range
+from process_utils import run_cmd_capture
+from app_logging import log_warning
 
 
-class MediaConversionMixin:
+class MediaConversion:
+    def __init__(self, state: EngineRuntime, manager: TaskOperations, operations: EngineOperations):
+        self.state = state
+        self.manager = manager
+        self.operations = operations
+
     @contextmanager
     def media_probe_session(self, *, new_attempt=False):
         """Share probes only within this task attempt, including nested output work."""
-        if not new_attempt and self._probe_cache.get() is not None:
+        if not new_attempt and self.state._probe_cache.get() is not None:
             yield
             return
         cache = MediaProbeCache()
-        token = self._probe_cache.set(cache)
+        token = self.state._probe_cache.set(cache)
         try:
             yield
         finally:
-            self._probe_cache.reset(token)
+            self.state._probe_cache.reset(token)
             cache.clear()
 
     def _invalidate_media_probes(self, *paths):
-        cache = self._probe_cache.get()
+        cache = self.state._probe_cache.get()
         if cache is not None:
             cache.invalidate(*paths)
 
     def _replace_media(self, source, destination):
-        self._invalidate_media_probes(source, destination)
+        self.operations._invalidate_media_probes(source, destination)
         try:
             os.replace(source, destination)
         finally:
-            self._invalidate_media_probes(source, destination)
+            self.operations._invalidate_media_probes(source, destination)
 
     def available_encoders(self):
-        with self._encoder_lock:
-            if self._encoders is None:
-                output = run_cmd_capture([self.ffmpeg, "-hide_banner", "-encoders"], timeout=10,
-                                         on_start=self._register_process, on_finish=self._unregister_process)
-                self._encoders = frozenset(line.split()[1] for line in output.splitlines()
+        with self.state._encoder_lock:
+            if self.state._encoders is None:
+                output = run_cmd_capture([self.state.ffmpeg, "-hide_banner", "-encoders"], timeout=10,
+                                         on_start=self.operations._register_process, on_finish=self.operations._unregister_process)
+                self.state._encoders = frozenset(line.split()[1] for line in output.splitlines()
                                           if re.match(r"^\s+[VA][A-Z.]{5}\s+\S+", line))
-            return self._encoders
+            return self.state._encoders
 
     def _estimate_mp3_bytes(self, tid, source_bytes):
         task = self.manager.get_task(tid) or {}
         duration = task.get("duration") or 0
-        bitrate = task.get("mp3_bitrate") or "192k"
+        bitrate = normalize_output(task)["audio_bitrate"]
+        if bitrate == 'auto':
+            bitrate = AUTOMATIC_AUDIO_BITRATES['mp3']
         try:
             match = re.fullmatch(r"([0-9]+)([kKmM]?)", str(bitrate))
             bps = int(match[1]) * {"": 1, "k": 1000, "m": 1000000}[match[2].lower()]
@@ -88,7 +97,7 @@ class MediaConversionMixin:
         if not self.manager.should_check_disk(tid, now):
             return
         # Even an unknown total must leave the minimum free-space reserve intact.
-        self._check_disk_space(folder, max(0, total - downloaded))
+        self.operations._check_disk_space(folder, max(0, total - downloaded))
 
     def _check_ffmpeg_disk_space(self, tid, cmd, duration=0):
         output = cmd[-1]
@@ -102,11 +111,11 @@ class MediaConversionMixin:
         sources = [path[5:] if path.startswith("file:") else path for path in sources]
         source_bytes = sum(os.path.getsize(path) for path in sources if os.path.isfile(path))
         if "libmp3lame" in cmd or ("-vn" in cmd and output.lower().endswith(".mp3")):
-            output_bytes = self._estimate_mp3_bytes(tid, source_bytes)
+            output_bytes = self.operations._estimate_mp3_bytes(tid, source_bytes)
         else:
             output_bytes = math.ceil(source_bytes * (4 if "libx264" in cmd else 1.1))
         # Sources already occupy disk space; reserve only the additional output here.
-        self._check_disk_space(folder, output_bytes)
+        self.operations._check_disk_space(folder, output_bytes)
         return folder
 
     def _maybe_trim(self, tid, worker_id, input_path, trim_start_text, trim_end_text):
@@ -118,15 +127,15 @@ class MediaConversionMixin:
         start_s, end_s = validate_trim_range(trim_start_text, trim_end_text)
         if start_s is None and end_s is None:
             return input_path
-        if not self.ffmpeg:
+        if not self.state.ffmpeg:
             return input_path
 
         # The original and trimmed copy coexist until trimming succeeds.
-        self._check_disk_space(os.path.dirname(input_path) or ".", os.path.getsize(input_path))
+        self.operations._check_disk_space(os.path.dirname(input_path) or ".", os.path.getsize(input_path))
         base, ext = os.path.splitext(input_path)
-        trimmed_path = self._dedupe_path(f"{base}_trim{ext}", tid)
-        source_duration = self._ffprobe_duration(input_path, self.ffprobe) or self._task_duration(tid)
-        cmd = [self.ffmpeg, "-y"]
+        trimmed_path = self.operations._dedupe_path(f"{base}_trim{ext}", tid)
+        source_duration = self.operations._ffprobe_duration(input_path, self.state.ffprobe) or self.operations._task_duration(tid)
+        cmd = [self.state.ffmpeg, "-y"]
         if start_s is not None:
             cmd += ["-ss", str(start_s)]
         cmd += ["-i", input_path]
@@ -141,20 +150,20 @@ class MediaConversionMixin:
         try:
             if source_duration > 0 and (start_s or 0) >= source_duration:
                 raise ValueError("The trim start must be earlier than the source duration.")
-            self._run_ffmpeg(tid, worker_id, cmd, duration=duration, status_label="Trimming",
+            self.operations._run_ffmpeg(tid, worker_id, cmd, duration=duration, status_label="Trimming",
                              progress_stage="trimming")
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
-            media = self._ffprobe_media(trimmed_path, fresh=True)
+            media = self.operations._ffprobe_media(trimmed_path, fresh=True)
             trimmed_duration = probe_duration(media)
             if (not any(s.get("codec_type") in ("audio", "video") for s in media["streams"])
                     or not math.isfinite(trimmed_duration) or trimmed_duration <= 0):
                 raise MediaOperationError("The trimmed file does not contain a valid media stream with positive duration.")
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
-            self._replace_media(trimmed_path, input_path)
+            self.operations._replace_media(trimmed_path, input_path)
             if (self.manager.get_task(tid) or {}).get('subtitle_mode', 'none') != 'none':
-                self._record_subtitle_start(tid, start_s or 0)
+                self.operations._record_subtitle_start(tid, start_s or 0)
         except (DownloadCancelled, InsufficientDiskSpace):
             raise  # Propagate cancellation and disk exhaustion instead of reporting success.
         except Exception as e:
@@ -169,7 +178,7 @@ class MediaConversionMixin:
             except Exception as error:
                 log_warning("Could not remove the temporary trim file", error, [("task", tid)], once_key=("_maybe_trim", tid))
             finally:
-                self._release_output_reservation(trimmed_path, tid)
+                self.operations._release_output_reservation(trimmed_path, tid)
         return input_path
 
     @staticmethod
@@ -179,20 +188,20 @@ class MediaConversionMixin:
 
     def _ffprobe_media(self, path, *, fresh=False):
         """Inspect actual media contents for codec and container compatibility decisions."""
-        return self._probe_media(path, self.ffprobe, fresh=fresh)
+        return self.operations._probe_media(path, self.state.ffprobe, fresh=fresh)
 
     def _probe_media(self, path, executable, *, fresh=False):
-        cache = self._probe_cache.get()
+        cache = self.state._probe_cache.get()
         if cache is not None:
-            return cache.read(path, executable, lambda: self._read_media_probe(path, executable), fresh=fresh)
-        return self._read_media_probe(path, executable)
+            return cache.read(path, executable, lambda: self.operations._read_media_probe(path, executable), fresh=fresh)
+        return self.operations._read_media_probe(path, executable)
 
     def _read_media_probe(self, path, executable):
         out = run_cmd_capture([
             executable, "-v", "error", "-show_entries",
             "format=format_name,duration,start_time:format_tags=major_brand:stream=index,codec_type,codec_name,sample_rate,channels,sample_fmt,bits_per_sample,bits_per_raw_sample,width,height:stream_disposition=attached_pic:stream_tags=filename,mimetype:chapter=id,start_time,end_time:chapter_tags=title",
             "-of", "json", path,
-        ], timeout=15, on_start=self._register_process, on_finish=self._unregister_process)
+        ], timeout=15, on_start=self.operations._register_process, on_finish=self.operations._unregister_process)
         info = json.loads(out)
         if (not isinstance(info, dict) or not isinstance(info.get("streams"), list) or not info["streams"]
                 or not all(isinstance(stream, dict) for stream in info["streams"])
@@ -202,17 +211,17 @@ class MediaConversionMixin:
 
     def _ffprobe_copy_start(self, path, stream_index, requested_start):
         """Locate one preceding video key packet without decoding the full video."""
-        probe = self._ffprobe_media(str(path))
+        probe = self.operations._ffprobe_media(str(path))
         try:
             origin = float(probe['format'].get('start_time') or 0)
             position = origin + requested_start
             if not math.isfinite(position):
                 raise ValueError('non-finite seek position')
             raw = run_cmd_capture([
-                self.ffprobe, '-v', 'error', '-read_intervals', f'{position:.9f}%+#1',
+                self.state.ffprobe, '-v', 'error', '-read_intervals', f'{position:.9f}%+#1',
                 '-select_streams', str(stream_index), '-show_entries', 'packet=pts_time,flags',
                 '-of', 'json', str(path),
-            ], timeout=15, on_start=self._register_process, on_finish=self._unregister_process)
+            ], timeout=15, on_start=self.operations._register_process, on_finish=self.operations._unregister_process)
             packet = json.loads(raw)['packets'][0]
             start = float(packet['pts_time']) - origin
             if ('K' not in packet.get('flags', '') or not math.isfinite(start)
@@ -240,8 +249,8 @@ class MediaConversionMixin:
         if self.manager.is_cancelled(tid):
             raise DownloadCancelled()
         self.manager.report_stage_progress(tid, "verification", status="Verifying H.264 compatibility")
-        info = self._ffprobe_media(path, fresh=True)
-        if self._is_h264_compatible(info):
+        info = self.operations._ffprobe_media(path, fresh=True)
+        if self.operations._is_h264_compatible(info):
             self.manager.report_stage_progress(tid, "verification", 1)
             return
         videos = [s for s in info["streams"] if s.get("codec_type") == "video"]
@@ -251,9 +260,9 @@ class MediaConversionMixin:
         copy_video = videos[0].get("codec_name") == "h264"
         copy_audio = not audios or audios[0].get("codec_name") == "aac"
         base = os.path.splitext(path)[0]
-        converted = self._dedupe_path(base + "_compatible.mp4", tid)
+        converted = self.operations._dedupe_path(base + "_compatible.mp4", tid)
         try:
-            cmd = [self.ffmpeg, "-y", "-i", path, "-map", "0:v:0", "-map", "0:a:0?",
+            cmd = [self.state.ffmpeg, "-y", "-i", path, "-map", "0:v:0", "-map", "0:a:0?",
                    "-c:v", "copy" if copy_video else "libx264"]
             if not copy_video:
                 cmd += ["-preset", "veryfast"]
@@ -262,26 +271,26 @@ class MediaConversionMixin:
                 cmd += ["-b:a", "192k"]
             cmd += ["-movflags", "+faststart", "-f", "mp4", converted]
             label = "Applying H.264 compatibility"
-            self.manager.update_task(tid, status=f"Worker{worker_id}: {label}")
+            self.manager.update_task(tid, state=TaskState.RUNNING, status=f"Worker{worker_id}: {label}")
             duration = probe_duration(info)
-            self._run_ffmpeg(tid, worker_id, cmd, duration, label, progress_stage="verification")
+            self.operations._run_ffmpeg(tid, worker_id, cmd, duration, label, progress_stage="verification")
             if self.manager.is_cancelled(tid):
                 raise DownloadCancelled()
-            if not self._is_h264_compatible(self._ffprobe_media(converted, fresh=True)):
+            if not self.operations._is_h264_compatible(self.operations._ffprobe_media(converted, fresh=True)):
                 raise MediaOperationError("Output MP4/H.264/AAC compatibility could not be verified")
-            self._replace_media(converted, path)
+            self.operations._replace_media(converted, path)
             self.manager.report_stage_progress(tid, "verification", 1)
         finally:
             try:
                 if os.path.exists(converted):
                     os.remove(converted)
             finally:
-                self._release_output_reservation(converted, tid)
+                self.operations._release_output_reservation(converted, tid)
 
     def _ffprobe_vcodec(self, path):
         """Return the first video stream's codec name, or an empty string if probing fails."""
         try:
-            info = self._ffprobe_media(path)
+            info = self.operations._ffprobe_media(path)
             return next((str(stream.get("codec_name") or "").lower() for stream in info["streams"]
                          if stream.get("codec_type") == "video"), "")
         except DownloadCancelled:
@@ -293,7 +302,7 @@ class MediaConversionMixin:
 
     def _ffprobe_duration(self, path, ffprobe_cmd):
         try:
-            return probe_duration(self._probe_media(path, ffprobe_cmd))
+            return probe_duration(self.operations._probe_media(path, ffprobe_cmd))
         except DownloadCancelled:
             raise
         except Exception as error:
@@ -303,10 +312,12 @@ class MediaConversionMixin:
 
     def _ffmpeg_convert_to_mp3(self, tid, worker_id, in_path, out_path):
         task = self.manager.get_task(tid) or {}
-        bitrate = task.get("mp3_bitrate") or "192k"
-        cmd = [self.ffmpeg, "-y", "-i", in_path, "-vn", "-ab", bitrate, "-ar", "44100", out_path]
-        duration = self._task_duration(tid) or self._ffprobe_duration(in_path, self.ffprobe)
-        self._run_ffmpeg(tid, worker_id, cmd, duration=duration, status_label="Converting to MP3")
+        bitrate = normalize_output(task)["audio_bitrate"]
+        if bitrate == 'auto':
+            bitrate = AUTOMATIC_AUDIO_BITRATES['mp3']
+        cmd = [self.state.ffmpeg, "-y", "-i", in_path, "-vn", "-ab", bitrate, "-ar", "44100", out_path]
+        duration = self.operations._task_duration(tid) or self.operations._ffprobe_duration(in_path, self.state.ffprobe)
+        self.operations._run_ffmpeg(tid, worker_id, cmd, duration=duration, status_label="Converting to MP3")
 
     def _task_duration(self, tid):
         task = self.manager.get_task(tid) or {}

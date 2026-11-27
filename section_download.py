@@ -4,8 +4,11 @@ import os
 from pathlib import Path
 import re
 
+from task_state import TaskState
 from errors import MediaOperationError
-from utils import _network_options, safe_filesize, validate_trim_range
+from download_support import _network_options
+from file_utils import safe_filesize
+from time_utils import validate_trim_range
 
 
 class SectionMetadata:
@@ -62,7 +65,7 @@ def download_section(preparer, tid, worker, url, info, selection, task, folder):
     if expected and info.duration and end is not None:
         expected = math.ceil(expected * min(1, (end - start + 10) / info.duration))
     engine._check_disk_space(folder, expected)
-    engine.manager.update_task(tid, status='Downloading selected section')
+    engine.manager.update_task(tid, state=TaskState.DOWNLOADING, status='Downloading selected section')
     engine.manager.set_log_stage(tid, 'download')
     def hook(data):
         if data.get('status') in ('downloading', 'finished'):

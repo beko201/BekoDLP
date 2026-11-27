@@ -12,8 +12,8 @@ from ui.theme import apply_theme
 from ui.exception_reporter import QtExceptionReporter
 from ui.diagnostics import add_diagnostic_buttons, open_log_folder, export_diagnostic_report
 from task_manager import TaskManager
-from utils import log_error, flush_warning_summaries, log_location_text
-from utils import SETTINGS_FILE
+from app_logging import log_error, flush_warning_summaries, log_location_text
+from app_paths import SETTINGS_FILE
 from ui.i18n import register, set_language, startup_language, tr
 
 

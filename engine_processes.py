@@ -5,13 +5,24 @@ import time
 import threading
 from contextvars import copy_context
 from queue import Queue, Empty
+from engine_runtime import EngineRuntime
+from component_ports import EngineOperations, TaskOperations
+from task_state import TaskState
 from ytdlp_process import kill_process_tree
 from processing_limits import video_encoder, budget_command
 from errors import MediaOperationError
-from utils import DownloadCancelled, NO_WINDOW, psutil, _check_cancelled, log_error, log_warning
+from errors import DownloadCancelled
+from process_utils import NO_WINDOW, psutil
+from download_support import _check_cancelled
+from app_logging import log_error, log_warning
 
 
-class MediaProcessMixin:
+class MediaProcesses:
+    def __init__(self, state: EngineRuntime, manager: TaskOperations, operations: EngineOperations):
+        self.state = state
+        self.manager = manager
+        self.operations = operations
+
     def _run_ffmpeg(self, tid, worker_id, cmd, duration=0, status_label="Processing", *, check=True,
                     progress_stage="processing", stop_event=None):
         def check_cancelled():
@@ -20,20 +31,20 @@ class MediaProcessMixin:
                 raise DownloadCancelled()
 
         def run(budget):
-            self._invalidate_media_probes(cmd[-1])
+            self.operations._invalidate_media_probes(cmd[-1])
             try:
-                return self._run_ffmpeg_process(
+                return self.operations._run_ffmpeg_process(
                     tid, worker_id, budget_command(cmd, budget), duration, status_label,
                     check=check, progress_stage=progress_stage, stop_event=stop_event)
             finally:
-                self._invalidate_media_probes(cmd[-1])
+                self.operations._invalidate_media_probes(cmd[-1])
 
         if video_encoder(cmd):
-            with self.processing_limits.video_slot(
+            with self.state.processing_limits.video_slot(
                     check_cancelled, lambda: self.manager.paused,
-                    lambda: self.manager.update_task(tid, status="Waiting for video conversion slot")) as budget:
+                    lambda: self.manager.update_task(tid, state=TaskState.WAITING, status="Waiting for video conversion slot")) as budget:
                 return run(budget)
-        return run(self.processing_limits.thread_budget())
+        return run(self.state.processing_limits.thread_budget())
 
     def _run_ffmpeg_process(self, tid, worker_id, cmd, duration=0, status_label="Processing", *, check=True,
                             progress_stage="processing", stop_event=None):
@@ -45,15 +56,15 @@ class MediaProcessMixin:
         if self.manager.is_cancelled(tid):
             raise DownloadCancelled()
         self.manager.report_stage_progress(tid, progress_stage, status=status_label)
-        disk_folder = self._check_ffmpeg_disk_space(tid, cmd, duration)
+        disk_folder = self.operations._check_ffmpeg_disk_space(tid, cmd, duration)
         proc = subprocess.Popen(
             [cmd[0], "-nostdin", *cmd[1:]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1, **NO_WINDOW)
         try:
-            self._register_process(proc)
-            with self.resource_lock:
-                self.current_process_pids[worker_id] = proc.pid
-            tail = self._pump_ffmpeg_progress(proc, tid, duration, status_label,
+            self.operations._register_process(proc)
+            with self.state.resource_lock:
+                self.state.current_process_pids[worker_id] = proc.pid
+            tail = self.operations._pump_ffmpeg_progress(proc, tid, duration, status_label,
                                               disk_folder=disk_folder, progress_stage=progress_stage,
                                               stop_event=stop_event)
             returncode = proc.wait()
@@ -78,15 +89,15 @@ class MediaProcessMixin:
                 try:
                     proc.stdout.close()
                 finally:
-                    with self.resource_lock:
-                        self.managed_processes.discard(proc)
-                        if self.current_process_pids.get(worker_id) == proc.pid:
-                            self.current_process_pids.pop(worker_id, None)
+                    with self.state.resource_lock:
+                        self.state.managed_processes.discard(proc)
+                        if self.state.current_process_pids.get(worker_id) == proc.pid:
+                            self.state.current_process_pids.pop(worker_id, None)
 
     def _register_process(self, proc):
-        with self.resource_lock:
-            self.managed_processes.add(proc)
-            stopping = self._force_stopping
+        with self.state.resource_lock:
+            self.state.managed_processes.add(proc)
+            stopping = self.state._force_stopping
         if stopping:
             # Covers a process created just as the shutdown snapshot was taken.
             try:
@@ -96,14 +107,14 @@ class MediaProcessMixin:
                 raise DownloadCancelled()
 
     def _unregister_process(self, proc):
-        with self.resource_lock:
-            self.managed_processes.discard(proc)
+        with self.state.resource_lock:
+            self.state.managed_processes.discard(proc)
 
     def terminate_managed_processes(self):
         """Kill only owned process handles; never look up a possibly reused PID."""
-        with self.resource_lock:
-            self._force_stopping = True
-            processes = list(self.managed_processes)
+        with self.state.resource_lock:
+            self.state._force_stopping = True
+            processes = list(self.state.managed_processes)
         for proc in processes:
             try:
                 if proc.poll() is None or getattr(proc, '_owned_process_tree', None) is not None:
@@ -141,7 +152,7 @@ class MediaProcessMixin:
                     raise DownloadCancelled()
                 now = time.monotonic()
                 if disk_folder and now - last_disk_check >= 1:
-                    self._check_disk_space(disk_folder, 0)
+                    self.operations._check_disk_space(disk_folder, 0)
                     last_disk_check = now
                 if proc.poll() is None and self.manager.paused != suspended:
                     try:
@@ -149,11 +160,11 @@ class MediaProcessMixin:
                         if self.manager.paused:
                             process.suspend()
                             suspended = True
-                            self.manager.update_task(tid, status="Paused")
+                            self.manager.update_task(tid, state=TaskState.PAUSED, status="Paused")
                         else:
                             process.resume()
                             suspended = False
-                            self.manager.update_task(tid, status=status_label)
+                            self.manager.update_task(tid, state=TaskState.RUNNING, status=status_label)
                     except psutil.NoSuchProcess:
                         pass
                 if output_closed:

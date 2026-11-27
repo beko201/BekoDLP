@@ -7,14 +7,10 @@ import download_engine
 from cookie_options import cookie_kwargs
 from network_options import network_kwargs
 from naming_templates import uses_playlist_naming
-from utils import (
-    DownloadCancelled,
-    PlaylistLinkNotAllowed,
-    normalize_url,
-    log_error,
-    unexpected_traceback,
-    env_info,
-)
+from errors import DownloadCancelled, PlaylistLinkNotAllowed
+from url_utils import normalize_url
+from app_logging import log_error, unexpected_traceback
+from runtime_tools import env_info
 
 
 def _link_resolution_key(url, expand_playlist):

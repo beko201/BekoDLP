@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 def run_power_action(action):

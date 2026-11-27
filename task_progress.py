@@ -3,8 +3,16 @@ import math
 import time
 import threading
 from collections import deque
+from task_runtime import TaskRuntime
+from component_ports import TaskOperations
 from queue_store import task_state
-from utils import format_eta, format_mb, log_error, log_warning, unexpected_traceback, env_info
+from task_state import (TaskState, state_of, legacy_status_state, STOPPED_STATES,
+                        PENDING_STATES, CLEARABLE_STATES)
+from time_utils import format_eta
+from file_utils import format_mb
+from app_logging import log_error, log_warning, unexpected_traceback
+from runtime_tools import env_info
+from output_compat import normalize_output
 from task_types import (
     DOWNLOAD_PROGRESS_INTERVAL,
     DOWNLOAD_SPEED_SAMPLES,
@@ -13,99 +21,105 @@ from task_types import (
 )
 
 
-class TaskProgressMixin:
+class TaskProgress:
+    def __init__(self, state: TaskRuntime, operations: TaskOperations):
+        self.state = state
+        self.operations = operations
+
     def _add_summary_progress(self, value):
         # Compensate additions/removals so repeated fractional updates do not
         # gradually move the displayed average across a rounding boundary.
-        combined = self._progress_sum + value
-        if abs(self._progress_sum) >= abs(value):
-            self._progress_correction += (self._progress_sum - combined) + value
+        combined = self.state._progress_sum + value
+        if abs(self.state._progress_sum) >= abs(value):
+            self.state._progress_correction += (self.state._progress_sum - combined) + value
         else:
-            self._progress_correction += (value - combined) + self._progress_sum
-        self._progress_sum = combined
+            self.state._progress_correction += (value - combined) + self.state._progress_sum
+        self.state._progress_sum = combined
 
     def _sync_summary_task(self, tid):
         """Update one contribution; caller holds tasks_lock, including worker cleanup."""
-        task = self.tasks.get(tid)
+        task = self.state.tasks.get(tid)
         durable = None
         if task is not None:
-            state = task_state(task, self._restart_after_shutdown, tid)
+            state = task_state(task, self.state._restart_after_shutdown, tid)
             durable = (state, task.get('title'), task.get('output_path') if state == 'completed' else None,
                        task['status'] if state in ('completed', 'failed') else '')
-        if self._queue_rows.get(tid) != durable:
-            self._queue_revision += 1
+        if self.state._queue_rows.get(tid) != durable:
+            self.state._queue_revision += 1
             if durable is None:
-                self._queue_rows.pop(tid, None)
+                self.state._queue_rows.pop(tid, None)
             else:
-                self._queue_rows[tid] = durable
-        previous = self._summary_rows.get(tid)
+                self.state._queue_rows[tid] = durable
+        previous = self.state._summary_rows.get(tid)
         current = None
         if task is not None:
-            status = task["status"]
-            failed = status.startswith("Error")
-            retryable = failed and tid not in self.tid_to_workerid
-            clearable = status.startswith(("Completed", "Error", "Queu", "Wait")) or status == "Cancelled"
-            actions = (not status.startswith(("Completed", "Error", "Cancel")), failed, retryable,
-                       status.startswith("Completed") and bool(task.get("output_path")), clearable)
+            state = state_of(task)
+            failed = state == TaskState.FAILED
+            retryable = failed and tid not in self.state.tid_to_workerid
+            clearable = state in CLEARABLE_STATES
+            actions = (state not in STOPPED_STATES, failed, retryable,
+                       state == TaskState.COMPLETED and bool(task.get("output_path")), clearable)
             progress = float(task.get("progress", 0))
-            current = (status.startswith(("Queu", "Wait")), failed, retryable, clearable,
+            current = (state in PENDING_STATES, failed, retryable, clearable,
                        progress if math.isfinite(progress) else 0, actions)
         if previous == current:
             return
         for index in range(4):
-            self._summary_counts[index] += int(current[index]) if current is not None else 0
-            self._summary_counts[index] -= int(previous[index]) if previous is not None else 0
+            self.state._summary_counts[index] += int(current[index]) if current is not None else 0
+            self.state._summary_counts[index] -= int(previous[index]) if previous is not None else 0
         if previous is not None:
-            self._add_summary_progress(-previous[4])
+            self.operations._add_summary_progress(-previous[4])
         if current is not None:
-            self._add_summary_progress(current[4])
-            self._summary_rows[tid] = current
+            self.operations._add_summary_progress(current[4])
+            self.state._summary_rows[tid] = current
         else:
-            self._summary_rows.pop(tid, None)
+            self.state._summary_rows.pop(tid, None)
         if previous is None or current is None or previous[5] != current[5]:
-            self._action_revision += 1
-        if not self._summary_rows:
-            self._progress_sum = self._progress_correction = 0.0
+            self.state._action_revision += 1
+        if not self.state._summary_rows:
+            self.state._progress_sum = self.state._progress_correction = 0.0
 
     def register_download_streams(self, tid, streams):
         """Register both streams before either parallel download can finish."""
-        with self.tasks_lock:
-            per_stream = self.stream_progress.setdefault(tid, {})
+        with self.state.tasks_lock:
+            per_stream = self.state.stream_progress.setdefault(tid, {})
             for key, total in streams.items():
                 per_stream.setdefault(key, (0, max(0, total or 0)))
 
-    def report_stage_progress(self, tid, stage, fraction=0, *, status=None, download_metrics=None):
+    def report_stage_progress(self, tid, stage, fraction=0, *, status=None, download_metrics=None, state=None):
         start, end = PROGRESS_STAGES[stage]
         fraction = float(fraction)
         if not math.isfinite(fraction):
             fraction = 0
         fraction = max(0, min(1, fraction))
-        self._task_update(tid, status=status, progress=start + (end - start) * fraction,
-                          progress_stage=stage, download_metrics=download_metrics)
-        self.set_log_stage(tid, {'downloading': 'download', 'processing': 'convert',
+        self.operations._task_update(tid, status=status, progress=start + (end - start) * fraction,
+                          progress_stage=stage, download_metrics=download_metrics,
+                          state=state if state is not None else (
+                              TaskState.DOWNLOADING if stage == 'downloading' else TaskState.RUNNING))
+        self.operations.set_log_stage(tid, {'downloading': 'download', 'processing': 'convert',
                                  'trimming': 'trim', 'verification': 'verify',
                                  'publishing': 'publish'}[stage], progress_stage=stage)
 
     def begin_task_attempt(self, tid):
         """Count actual executions, retaining the count when a task is requeued."""
-        with self.tasks_lock:
-            task = self.tasks.get(tid)
+        with self.state.tasks_lock:
+            task = self.state.tasks.get(tid)
             if task is None:
                 return None
             task['attempt'] = task.get('attempt', 0) + 1
-            self._queue_revision += 1
+            self.state._queue_revision += 1
             task['_log_stage'] = 'resolve'
             return task['attempt']
 
     def task_log_fields(self, tid):
-        with self.tasks_lock:
-            task = self.tasks.get(tid) or {}
+        with self.state.tasks_lock:
+            task = self.state.tasks.get(tid) or {}
             return {'task': tid, 'attempt': task.get('attempt', 0),
                     'stage': task.get('_log_stage', 'resolve')}
 
     def set_log_stage(self, tid, stage, *, progress_stage=None):
-        with self.tasks_lock:
-            task = self.tasks.get(tid)
+        with self.state.tasks_lock:
+            task = self.state.tasks.get(tid)
             if task is None or task.get('_log_stage') == stage:
                 return
             if progress_stage is not None and task.get('_progress_stage') != progress_stage:
@@ -116,13 +130,19 @@ class TaskProgressMixin:
                   component='task_manager', **fields)
 
     def _task_update(self, tid, title=None, status=None, progress=None, output_path=None,
-                     progress_stage=None, download_metrics=None):
-        with self.tasks_lock:
-            task = self.tasks.get(tid)
+                     progress_stage=None, download_metrics=None, state=None):
+        # Compatibility is confined to status-only callers; structured updates
+        # never derive behavior from their display text.
+        if state is not None:
+            state = TaskState(state)
+        elif status is not None:
+            state = legacy_status_state(status)
+        with self.state.tasks_lock:
+            task = self.state.tasks.get(tid)
             if task is None:
                 return
             if progress_stage is not None:
-                if task["status"].startswith(("Completed", "Error", "Cancel")):
+                if state_of(task) in STOPPED_STATES:
                     return
                 current_stage = task.get("_progress_stage", "downloading")
                 if PROGRESS_STAGES[progress_stage][0] < PROGRESS_STAGES[current_stage][0]:
@@ -130,12 +150,14 @@ class TaskProgressMixin:
                 task["_progress_stage"] = progress_stage
             if title is not None:
                 task["title"] = title
+            if state is not None:
+                task['state'] = state
             if status is not None:
-                if status.startswith("Completed") and task.get("warnings"):
+                if state_of(task) == TaskState.COMPLETED and task.get("warnings"):
                     status += " — Warning: " + "; ".join(task["warnings"])
                 task["status"] = status
             if progress is not None:
-                complete = task["status"].startswith("Completed") and bool(output_path or task.get("output_path"))
+                complete = state_of(task) == TaskState.COMPLETED and bool(output_path or task.get("output_path"))
                 ceiling = 100 if complete else 99
                 value = float(progress)
                 if not math.isfinite(value):
@@ -146,34 +168,38 @@ class TaskProgressMixin:
             if download_metrics is not None:
                 task.update(download_metrics)
             if (task.get("_progress_stage", "downloading") != "downloading"
-                    or not task["status"].startswith("Downloading")):
+                    or state_of(task) != TaskState.DOWNLOADING):
                 task["speed_bps"] = None
                 task["eta_seconds"] = None
-            self._sync_summary_task(tid)
-            self._emit_task("task_updated", tid, task)
+            self.operations._sync_summary_task(tid)
+            self.operations._emit_task("task_updated", tid, task)
         if progress is not None:
-            self._update_global_progress()
+            self.operations._update_global_progress()
 
     def _task_error(self, tid, errmsg):
-        self._log_task_error(tid, errmsg)
-        self._task_update(tid, status=f"Error: {errmsg}")
-        self._update_global_progress()
-        self._update_queue_label()
+        self.operations._log_task_error(tid, errmsg)
+        self.operations._task_update(tid, state=TaskState.FAILED, status=f"Error: {errmsg}")
+        self.operations._update_global_progress()
+        self.operations._update_queue_label()
 
     def _update_global_progress(self):
-        self.emit("progress_changed")
+        self.operations.emit("progress_changed")
 
     def _update_queue_label(self):
-        self.emit("queue_changed")
+        self.operations.emit("queue_changed")
 
     def _notify(self, text):
-        self.emit("notice", message=text)
+        self.operations.emit("notice", message=text)
 
     def _log_task_error(self, tid, errmsg):
         """Log task errors with URL, options, worker and runtime version context."""
-        with self.tasks_lock:
-            t = dict(self.tasks.get(tid) or {})
-            wid = self.tid_to_workerid.get(tid)
+        with self.state.tasks_lock:
+            t = dict(self.state.tasks.get(tid) or {})
+            wid = self.state.tid_to_workerid.get(tid)
+        try:
+            t = normalize_output(t)
+        except ValueError:
+            pass  # Diagnostics must also be available for invalid submitted profiles.
         title = t.get("title")
         if title == "(resolving title...)":
             title = None
@@ -181,11 +207,11 @@ class TaskProgressMixin:
         if t.get("trim_start") or t.get("trim_end"):
             trim = f"{t.get('trim_start') or '0:00'} - {t.get('trim_end') or 'end'}"
         options_text = ""
-        if t.get("format"):
-            options_text = f"{t.get('format')} | quality: {t.get('quality')} | codec: {t.get('codec_mode')}"
+        if t.get("output_mode"):
+            options_text = f"{t.get('output_mode')} | quality: {t.get('quality')} | codec: {t.get('video_codec')}"
         log_error(f"ERROR {tid}", details=[
             ("error", errmsg), ("link", t.get("url")), ("title", title), ("settings", options_text),
-            ("bitrate", t.get("mp3_bitrate")), ("folder", t.get("folder")),
+            ("bitrate", t.get("audio_bitrate")), ("folder", t.get("folder")),
             ("output mode", t.get("output_mode")), ("container", t.get("container")),
             ("video codec", t.get("video_codec")), ("audio codec", t.get("audio_codec")),
             ("audio bit depth", t.get("audio_bit_depth")),
@@ -196,24 +222,24 @@ class TaskProgressMixin:
 
     def _on_download_progress(self, tid, stream_key, downloaded, total, *, force=False):
         try:
-            with self.tasks_lock:
-                task = self.tasks.get(tid)
-                if (task is None or task["status"].startswith(("Completed", "Error", "Cancel"))
+            with self.state.tasks_lock:
+                task = self.state.tasks.get(tid)
+                if (task is None or state_of(task) in STOPPED_STATES
                         or task.get("_progress_stage", "downloading") != "downloading"):
                     return
-                lock = self._download_progress_locks.get(tid)
+                lock = self.state._download_progress_locks.get(tid)
                 if lock is None:
-                    lock = self._download_progress_locks[tid] = threading.Lock()
+                    lock = self.state._download_progress_locks[tid] = threading.Lock()
             # Serialize publication for this task without blocking other tasks
             # behind its speed calculation or stage notification.
             with lock:
                 ts = time.monotonic()
-                with self.tasks_lock:
-                    task = self.tasks.get(tid)
-                    if (task is None or task["status"].startswith(("Completed", "Error", "Cancel"))
+                with self.state.tasks_lock:
+                    task = self.state.tasks.get(tid)
+                    if (task is None or state_of(task) in STOPPED_STATES
                             or task.get("_progress_stage", "downloading") != "downloading"):
                         return
-                    per_stream = self.stream_progress.setdefault(tid, {})
+                    per_stream = self.state.stream_progress.setdefault(tid, {})
                     previous = per_stream.get(stream_key)
                     downloaded, total = max(0, int(downloaded or 0)), max(0, int(total or 0))
                     restarted = previous is not None and downloaded < previous[0]
@@ -227,15 +253,15 @@ class TaskProgressMixin:
                     task["total_bytes"] = total_sum
                     last_report = task.get("_download_report_at")
                     if (not force and not restarted and not finished
-                            and task["status"].startswith("Downloading") and last_report is not None
+                            and state_of(task) == TaskState.DOWNLOADING and last_report is not None
                             and ts - last_report < DOWNLOAD_PROGRESS_INTERVAL):
                         return
                     task["_download_report_at"] = ts
                     percent_of_download = (min(100, downloaded_sum / total_sum * 100)
                                            if known_totals and total_sum else 0)
-                    hist = self.download_speed_history.get(tid)
+                    hist = self.state.download_speed_history.get(tid)
                     if hist is None:
-                        hist = self.download_speed_history[tid] = deque(maxlen=DOWNLOAD_SPEED_SAMPLES)
+                        hist = self.state.download_speed_history[tid] = deque(maxlen=DOWNLOAD_SPEED_SAMPLES)
                     if restarted or hist and downloaded_sum < hist[-1][1]:
                         hist.clear()
                     hist.append((ts, downloaded_sum))
@@ -255,7 +281,7 @@ class TaskProgressMixin:
                         f"{format_mb(downloaded_sum)}/{format_mb(total_sum)} - "
                         f"{speed_bps * 8 / 1e6:.2f} Mbps - Time left: {format_eta(eta_seconds)}"
                     )
-                self.report_stage_progress(tid, "downloading", percent_of_download / 100, status=status,
+                self.operations.report_stage_progress(tid, "downloading", percent_of_download / 100, status=status,
                                            download_metrics={"speed_bps": speed_bps, "eta_seconds": eta_seconds})
         except Exception as error:
             log_warning("Could not update download progress", error, [("task", tid)], once_key=("_on_download_progress", tid))

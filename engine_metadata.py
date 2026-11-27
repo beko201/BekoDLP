@@ -11,17 +11,11 @@ from errors import MediaOperationError
 from cookie_options import cookie_selection, cookie_kwargs
 from network_options import network_selection, network_kwargs
 from naming_templates import playlist_naming_context
-from utils import (
-    DownloadCancelled,
-    PlaylistLinkNotAllowed,
-    MAX_FETCH_RETRIES,
-    _check_cancelled,
-    _network_options,
-    normalize_url,
-    log_error,
-    log_warning,
-    env_info,
-)
+from errors import DownloadCancelled, PlaylistLinkNotAllowed
+from download_support import MAX_FETCH_RETRIES, _check_cancelled, _network_options
+from url_utils import normalize_url
+from app_logging import log_error, log_warning
+from runtime_tools import env_info
 
 
 PLAYLIST_BATCH_SIZE = 100

@@ -4,14 +4,16 @@ import math
 from copy import copy
 
 from media_options import canonical_codec, validate_output_options
-from media_plan import StreamAction, build_output_plan, read_bit_depth
+from media_plan import StreamAction, build_output_plan, read_bit_depth, retry_output_plan
 from media_probe import probe_duration
 from media_sources import SourcePreparer, read_ebml_doctype, read_mp4_faststart
-from utils import DownloadCancelled, InsufficientDiskSpace, validate_trim_range, log_warning
+from errors import DownloadCancelled, InsufficientDiskSpace
+from time_utils import validate_trim_range
+from app_logging import log_warning
 from errors import MediaOperationError
 from chapter_options import ChapterBatch, ChapterPart, chapter_ranges
 from naming_templates import render_naming
-from utils import safe_filename
+from file_utils import safe_filename
 from range_options import validate_range_options
 
 
@@ -121,7 +123,7 @@ class ConfiguredOutput:
                 return batch
         destination = self.reserve_destination(tid, folder, title, plan)
         if trim is None:
-            self.execute_plan(tid, worker, sources, plan, destination, task)
+            destination, plan = self.execute_with_fallback(tid, worker, sources, plan, destination, task, folder, title)
             self.verify_destination(tid, destination, plan)
         else:
             try:
@@ -281,6 +283,26 @@ class ConfiguredOutput:
         if self.manager.is_cancelled(tid):
             raise DownloadCancelled()
 
+    def execute_with_fallback(self, tid, worker, sources, plan, destination, task, folder, title):
+        try:
+            self.execute_plan(tid, worker, sources, plan, destination, task)
+        except (DownloadCancelled, InsufficientDiskSpace):
+            raise
+        except MediaOperationError:
+            self.check_cancelled(tid)
+            retry = retry_output_plan(task, plan)
+            if retry is None:
+                raise
+            if retry.needs_encoders:
+                retry = retry_output_plan(task, plan, self.engine.available_encoders())
+            if os.path.exists(destination):
+                os.remove(destination)
+            self.engine._release_output_reservation(destination, tid)
+            destination = self.reserve_destination(tid, folder, title, retry)
+            self.execute_plan(tid, worker, sources, retry, destination, task)
+            plan = retry
+        return destination, plan
+
     def reserve_destination(self, tid, folder, title, plan):
         suffix = "." + plan.extension if plan.extension else ""
         return self.engine._dedupe_path(os.path.join(folder, title + suffix), tid)
@@ -309,4 +331,7 @@ class ConfiguredOutput:
                 stop = min(stop, duration)
             duration = max(0, stop - (start or 0))
             label += " and trimming"
-        self.engine._run_ffmpeg(tid, worker, command, duration=duration, status_label=label)
+        result = self.engine._run_ffmpeg(tid, worker, command, duration=duration, status_label=label)
+        if result not in (None, 0):
+            self.check_cancelled(tid)
+            raise MediaOperationError(f'FFmpeg output processing failed ({result}).')
