@@ -447,7 +447,7 @@ class QtTaskActionTests(unittest.TestCase):
         self.window.task_table.view.sortByColumn(1, Qt.SortOrder.AscendingOrder)
         self.select(completed)
         self.assertTrue(self.window.show_file_action.isEnabled())
-        with patch("ui.main_window.reveal_file") as reveal:
+        with patch("ui.window_tasks.reveal_file") as reveal:
             self.window.show_file_action.trigger()
             self.window._activate_task(self.window.task_table.proxy.index(0, 1))
         self.assertEqual(reveal.call_count, 2)

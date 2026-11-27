@@ -13,7 +13,7 @@ import wave
 import download_engine
 import task_manager
 from task_manager import TaskManager, TaskOptions
-import utils
+import app_logging
 
 
 class ProgressTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class ProgressTests(unittest.TestCase):
         self.tid = self.manager.add_urls(['https://example.com/video'], TaskOptions(folder=temp.name))[0]
         self.engine = download_engine.DownloadEngine(self.manager, ffmpeg='ffmpeg', ffprobe='ffprobe')
         self.manager.engine = self.engine
-        log_patch = patch.object(utils, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
+        log_patch = patch.object(app_logging, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
         log_patch.start()
         self.addCleanup(log_patch.stop)
 
@@ -320,7 +320,8 @@ class ProgressTests(unittest.TestCase):
             audio.writeframes(b'\0\0' * 44100)
         output = self.folder / 'output'
         output.mkdir()
-        self.manager.tasks[self.tid].update(folder=str(output), format='MP3', trim_end='0.5')
+        self.manager.tasks[self.tid].update(folder=str(output), output_mode='audio', container='mp3',
+                                           audio_codec='mp3', trim_end='0.5')
         info = download_engine.YTInfo('url', {'title': 'Example', 'duration': 1, 'formats': [
             {'format_id': 'a', 'ext': 'wav', 'vcodec': 'none', 'acodec': 'pcm_s16le'},
         ]})

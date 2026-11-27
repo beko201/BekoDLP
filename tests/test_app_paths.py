@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import app_paths
-from utils import portable_deno_path, which_executable
+from runtime_tools import portable_deno_path, which_executable
 
 
 class PortablePathTests(unittest.TestCase):

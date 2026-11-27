@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 
 import download_engine
 from task_manager import TaskManager, TaskOptions
-import utils
+import app_logging
+import process_utils
 
 
 def wait_until(predicate, timeout=5):
@@ -29,7 +30,7 @@ class ComponentArchitectureTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.folder = Path(self.temp.name)
-        logs = patch.object(utils, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
+        logs = patch.object(app_logging, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
         logs.start()
         self.addCleanup(logs.stop)
 
@@ -85,7 +86,7 @@ assert manager.finish_shutdown()
 assert 'gui' not in sys.modules
 """
         result = subprocess.run([sys.executable, '-c', code], cwd=Path(__file__).resolve().parents[1],
-                                capture_output=True, text=True, timeout=15, **utils.NO_WINDOW)
+                                capture_output=True, text=True, timeout=15, **process_utils.NO_WINDOW)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_required_packages_fail_clearly_when_missing(self):
@@ -109,7 +110,7 @@ else:
     raise AssertionError('Application silently continued without a required package')
 """
                 result = subprocess.run([sys.executable, '-c', code], cwd=Path(__file__).resolve().parents[1],
-                                        capture_output=True, text=True, timeout=15, **utils.NO_WINDOW)
+                                        capture_output=True, text=True, timeout=15, **process_utils.NO_WINDOW)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_ffmpeg_distribution_requires_both_executables(self):
@@ -176,7 +177,7 @@ else:
         target.mkdir()
         subprocess.run([shutil.which('ffmpeg'), '-y', '-f', 'lavfi', '-i',
                         'sine=frequency=440:duration=1', str(source)], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **utils.NO_WINDOW)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **process_utils.NO_WINDOW)
         manager = self.manage(TaskManager())
         info = download_engine.YTInfo('offline', {'title': 'Offline audio', 'duration': 1,
                 'formats': [{'format_id': 'audio', 'ext': 'wav', 'vcodec': 'none',

@@ -12,6 +12,10 @@ import engine_conversion
 import engine_metadata
 import engine_transfers
 import task_manager
+import app_logging
+import file_utils
+import process_utils
+import runtime_tools
 import utils
 
 
@@ -78,7 +82,7 @@ class TestApplication(metaclass=_HarnessType):
 class _ComponentNamespace:
     def __init__(self):
         owners = {}
-        for module in (utils, download_engine, task_manager):
+        for module in (app_logging, file_utils, process_utils, runtime_tools, utils, download_engine, task_manager):
             for name in vars(module):
                 owners.setdefault(name, module)
         owners.update(psutil=download_engine, run_cmd_capture=engine_conversion,

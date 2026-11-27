@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-import utils
+import app_logging
 from diagnostics import mask_personal_paths
 from task_manager import TaskManager, TaskOptions, PlaylistFetcher
 from errors import MediaOperationError
@@ -32,11 +32,11 @@ class QtDiagnosticsTests(unittest.TestCase):
         self.fallback = self.folder / 'fallback' / 'errors.log'
         self.primary.parent.mkdir()
         self.fallback.parent.mkdir()
-        utils._WARNING_STATES.clear()
-        self.addCleanup(utils._WARNING_STATES.clear)
-        for target, value in (('utils.ERROR_LOG_FILE', str(self.primary)),
-                              ('utils.FALLBACK_ERROR_LOG_FILE', str(self.fallback)),
-                              ('utils._LOG_STATE', None)):
+        app_logging._WARNING_STATES.clear()
+        self.addCleanup(app_logging._WARNING_STATES.clear)
+        for target, value in (('app_logging.ERROR_LOG_FILE', str(self.primary)),
+                              ('app_logging.FALLBACK_ERROR_LOG_FILE', str(self.fallback)),
+                              ('app_logging._LOG_STATE', None)):
             patcher = patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -64,14 +64,14 @@ class QtDiagnosticsTests(unittest.TestCase):
         self.app.clipboard().clear()
 
     def force_fallback(self):
-        write_log = utils._write_log
+        write_log = app_logging._write_log
         def write(path, block):
             if path == str(self.primary):
                 raise PermissionError('locked primary')
             write_log(path, block)
-        with patch.object(utils, '_write_log', side_effect=write), \
-                patch.object(utils.sys, 'stderr', None), patch.object(utils.sys, '__stderr__', None):
-            utils.log_error('Sample fallback failure')
+        with patch.object(app_logging, '_write_log', side_effect=write), \
+                patch.object(app_logging.sys, 'stderr', None), patch.object(app_logging.sys, '__stderr__', None):
+            app_logging.log_error('Sample fallback failure')
 
     def test_error_dialog_and_help_copy_details_show_actual_fallback_path(self):
         self.force_fallback()

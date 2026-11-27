@@ -1,4 +1,5 @@
 """Pending metadata eviction must fall back to normal, cancellable extraction."""
+import app_logging
 import sys
 from pathlib import Path
 import tempfile
@@ -8,7 +9,7 @@ from unittest.mock import Mock, patch
 import download_engine
 from resolved_info_cache import ResolvedInfoCache, metadata_size
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 
 
 class ResolvedInfoCacheTests(unittest.TestCase):
@@ -85,7 +86,7 @@ class ResolvedInfoCacheTests(unittest.TestCase):
     def test_cache_miss_uses_normal_extraction_with_cancellation_and_error_handling(self):
         for error in (DownloadCancelled(), RuntimeError('offline extraction failure')):
             with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as folder, \
-                    patch('utils.ERROR_LOG_FILE', str(Path(folder, 'errors.log'))):
+                    patch('app_logging.ERROR_LOG_FILE', str(Path(folder, 'errors.log'))):
                 manager = TaskManager()
                 manager._resolved_info = ResolvedInfoCache(max_entries=1)
                 first, _ = [manager.add_urls([url], TaskOptions(folder=folder),

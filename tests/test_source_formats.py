@@ -21,8 +21,10 @@ from source_formats import format_size, selected_sources
 from task_manager import TaskManager, TaskOptions
 from ui.source_formats_dialog import SourceFormatsDialog
 from ui.main_window import MainWindow
+from cookie_options import BROWSER_COOKIE_COPY_HELP
+from ui.i18n import tr
 from qt_support import finish_window_close
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 
 
 def metadata():
@@ -59,6 +61,15 @@ class SourceFormatTests(unittest.TestCase):
         self.addCleanup(dialog.reject)
         dialog._receive(0, self.info, '')
         return dialog
+
+    def test_cookie_copy_error_explains_recovery_in_the_source_dialog(self):
+        dialog = SourceFormatsDialog(self.manager, self.info.url, self.options)
+        self.addCleanup(dialog.reject)
+        error = 'yt-dlp failed: ERROR: Could not copy Chrome cookie database.'
+        dialog._receive(0, None, error)
+        self.assertIn(tr(BROWSER_COOKIE_COPY_HELP), dialog.status.text())
+        self.assertIn(error, dialog.status.text())
+        self.assertFalse(dialog.add_button.isEnabled())
 
     def test_manual_selection_overrides_quality_and_automatic_codec_preferences(self):
         options = self.explicit(video_codec='h264', audio_codec='aac')

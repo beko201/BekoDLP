@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch
 
 import download_engine
 from task_manager import TaskManager, TaskOptions
-import utils
+import app_logging
+import errors
+import process_utils
 
 
 FFMPEG = shutil.which('ffmpeg')
@@ -22,7 +24,7 @@ class H264CompatibilityTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.folder = Path(temp.name)
-        log_patch = patch.object(utils, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
+        log_patch = patch.object(app_logging, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
         log_patch.start()
         self.addCleanup(log_patch.stop)
         self.output = self.folder / 'output'
@@ -34,7 +36,7 @@ class H264CompatibilityTests(unittest.TestCase):
 
     def run_media(self, args):
         return subprocess.run(args, check=True, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, **utils.NO_WINDOW).stdout
+                              stderr=subprocess.PIPE, **process_utils.NO_WINDOW).stdout
 
     def source(self, video='libx264', audio='libopus', container='mp4'):
         path = self.folder / ('source.' + container)
@@ -198,8 +200,13 @@ class H264CompatibilityTests(unittest.TestCase):
         source = self.source(audio='aac')
         with patch.object(self.engine, '_run_ffmpeg', wraps=self.engine._run_ffmpeg) as runner:
             task = self.process_progressive(source)
-        runner.assert_not_called()
-        self.assertEqual(source.read_bytes(), Path(task['output_path']).read_bytes())
+        self.assertTrue(task['status'].startswith('Completed'), task['status'])
+        for call in runner.call_args_list:
+            command = call.args[2]
+            self.assertEqual(command[command.index('-c:v') + 1], 'copy')
+            self.assertEqual(command[command.index('-c:a') + 1], 'copy')
+        self.assertEqual(self.video_hash(source), self.video_hash(task['output_path']))
+        self.assertEqual(self.audio_hash(source), self.audio_hash(task['output_path']))
 
     def test_real_video_codec_overrides_progressive_metadata(self):
         task = self.process_progressive(self.source(video='mpeg4', audio='aac'))
@@ -262,11 +269,11 @@ class H264CompatibilityTests(unittest.TestCase):
                 def convert(tid, worker, cmd, *args, **kwargs):
                     Path(cmd[-1]).write_bytes(b'invalid output')
                     if failure == 'cancel':
-                        raise utils.DownloadCancelled()
+                        raise errors.DownloadCancelled()
                     if failure == 'ffmpeg':
                         raise RuntimeError('conversion failed')
 
-                expected = utils.DownloadCancelled if failure == 'cancel' else RuntimeError
+                expected = errors.DownloadCancelled if failure == 'cancel' else RuntimeError
                 with patch.object(self.engine, '_run_ffmpeg', side_effect=convert), \
                         patch.object(self.engine, '_ffprobe_media', return_value=incompatible):
                     with self.assertRaises(expected):

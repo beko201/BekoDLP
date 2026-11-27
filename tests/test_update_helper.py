@@ -13,7 +13,7 @@ import zipfile
 import io
 from tests.package_fixture import package_payload
 from package_layout import MANIFEST_NAME, file_sha256
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows update helper')

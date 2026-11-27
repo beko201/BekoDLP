@@ -16,7 +16,7 @@ from settings import SettingsStore
 from queue_store import QueueStore
 from task_manager import TaskOptions
 from saved_profiles import capture_profile
-from utils import _log_text
+from app_logging import _log_text
 
 URL = 'socks5h://test-user:private-proxy-password-791@127.0.0.1:1080'
 

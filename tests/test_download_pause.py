@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import download_engine
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 
 
 def wait_until(predicate, timeout=4):

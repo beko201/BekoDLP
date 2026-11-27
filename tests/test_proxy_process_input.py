@@ -8,7 +8,8 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import unquote
 
-from utils import DownloadCancelled, psutil
+from errors import DownloadCancelled
+from process_utils import psutil
 from ytdlp_process import YtDlpProcess, YtDlpProcessError
 
 

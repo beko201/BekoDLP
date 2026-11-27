@@ -9,7 +9,7 @@ from urllib.error import HTTPError
 
 import download_engine
 from task_manager import PlaylistFetcher, TaskManager, TaskOptions
-from utils import DownloadCancelled, InsufficientDiskSpace
+from errors import DownloadCancelled, InsufficientDiskSpace
 
 
 class MetadataReuseTests(unittest.TestCase):
@@ -109,13 +109,22 @@ class MetadataReuseTests(unittest.TestCase):
         manager = TaskManager()
         info = self.info()
 
-        def convert(tid, worker_id, source, output):
-            Path(output).write_bytes(Path(source).read_bytes())
+        def convert(tid, worker_id, command, **kwargs):
+            source = command[command.index('-i') + 1]
+            Path(command[-1]).write_bytes(Path(source).read_bytes())
+            return 0
+
+        def probe(path, **kwargs):
+            codec = 'mp3' if str(path).endswith('.mp3') else 'opus'
+            return {'streams': [{'index': 0, 'codec_type': 'audio', 'codec_name': codec}],
+                    'format': {'format_name': 'mp3' if codec == 'mp3' else 'webm', 'duration': '1'}}
 
         with patch('engine_metadata._flat_extract', return_value=(info._media_info.info, None)), \
                 patch('engine_metadata.fetch_ytinfo_with_retry') as fetch, \
                 patch.object(download_engine.YtDlpProcess, 'extract_info', side_effect=AssertionError('redundant extraction')), \
-                patch.object(manager.engine, '_ffmpeg_convert_to_mp3', side_effect=convert):
+                patch.object(manager.engine, '_run_ffmpeg', side_effect=convert), \
+                patch.object(manager.engine, '_ffprobe_media', side_effect=probe), \
+                patch.object(manager.engine, 'available_encoders', return_value={'libmp3lame'}):
             PlaylistFetcher(manager, info.url, self.options, False).run()
             manager._process_task(('T1', info.url), 1)
         fetch.assert_not_called()

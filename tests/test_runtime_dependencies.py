@@ -4,7 +4,7 @@ import subprocess
 import sys
 import unittest
 
-import utils
+import process_utils
 
 
 class RuntimeDependencyTests(unittest.TestCase):
@@ -22,5 +22,5 @@ assert callable(main.main)
 assert 'gui' not in sys.modules
 """
         result = subprocess.run([sys.executable, '-c', code], cwd=Path(__file__).resolve().parents[1],
-                                capture_output=True, text=True, timeout=15, **utils.NO_WINDOW)
+                                capture_output=True, text=True, timeout=15, **process_utils.NO_WINDOW)
         self.assertEqual(result.returncode, 0, result.stderr)

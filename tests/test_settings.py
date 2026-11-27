@@ -27,7 +27,10 @@ class SettingsTests(unittest.TestCase):
                                          'last_folder': None, 'log_backup_count': -1})
         self.assertEqual(len(issues), 5)
         for key in issues:
-            self.assertEqual(data[key], DEFAULTS[key])
+            if key == 'format':
+                self.assertEqual(data['output_mode'], DEFAULTS['output_mode'])
+            else:
+                self.assertEqual(data[key], DEFAULTS[key])
 
     def test_historical_codec_preferences_migrate_without_losing_selection(self):
         for legacy, expected in (("Orijinal (Otomatik)", "Original (Automatic)"),
@@ -37,10 +40,11 @@ class SettingsTests(unittest.TestCase):
                 store = SettingsStore(self.path)
                 data, warnings = store.load()
                 self.assertFalse(warnings)
-                self.assertEqual(data['codec_mode'], expected)
+                self.assertEqual(data['video_codec'], 'h264' if expected == 'H.264 (Compatibility)' else 'original')
                 self.assertTrue(store.save({}))
                 saved = json.loads(self.path.read_text())
-                self.assertEqual(saved['codec_mode'], expected)
+                self.assertNotIn('codec_mode', saved)
+                self.assertEqual(saved['video_codec'], 'h264' if expected == 'H.264 (Compatibility)' else 'original')
                 self.assertEqual(saved['custom'], 'keep')
                 self.assertFalse(SettingsStore(self.path).load()[1])
 

@@ -9,7 +9,9 @@ import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-import utils
+import app_logging
+import download_support
+import errors
 from ytdlp_process import YtDlpProcessError
 from task_manager import TaskManager, TaskOptions
 from download_engine import DownloadEngine
@@ -35,8 +37,8 @@ class ErrorReportingTests(unittest.TestCase):
             patcher = patch.object(downloader, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        utils._WARNING_STATES.clear()
-        self.addCleanup(utils._WARNING_STATES.clear)
+        app_logging._WARNING_STATES.clear()
+        self.addCleanup(app_logging._WARNING_STATES.clear)
         self.app = cleanup_fixture.TaskCleanupTests.make_app(self, self.folder)
         self.app.current_process_pids = {}
         self.app.paused = False
@@ -49,57 +51,57 @@ class ErrorReportingTests(unittest.TestCase):
         return path.read_text(encoding='utf-8') if path.exists() else ''
 
     def test_configured_repeat_interval_controls_summary_timing(self):
-        with patch.object(utils, '_WARNING_REPEAT_SECONDS', 60), \
-                patch.object(utils, '_LOG_MAX_BYTES', 5 * 1024 * 1024), \
-                patch.object(utils, '_LOG_BACKUP_COUNT', 3), \
-                patch.object(utils.time, 'monotonic', return_value=100) as timer:
-            utils.configure_logging(5 * 1024 * 1024, 3, repeat_seconds=15)
-            utils.log_warning('Configured interval', 'sample', once_key='interval')
+        with patch.object(app_logging, '_WARNING_REPEAT_SECONDS', 60), \
+                patch.object(app_logging, '_LOG_MAX_BYTES', 5 * 1024 * 1024), \
+                patch.object(app_logging, '_LOG_BACKUP_COUNT', 3), \
+                patch.object(app_logging.time, 'monotonic', return_value=100) as timer:
+            app_logging.configure_logging(5 * 1024 * 1024, 3, repeat_seconds=15)
+            app_logging.log_warning('Configured interval', 'sample', once_key='interval')
             timer.return_value = 114
-            utils.log_warning('Configured interval', 'sample', once_key='interval')
+            app_logging.log_warning('Configured interval', 'sample', once_key='interval')
             self.assertEqual(self.text().count('[WARNING]'), 1)
             timer.return_value = 115
-            utils.log_warning('Configured interval', 'sample', once_key='interval')
+            app_logging.log_warning('Configured interval', 'sample', once_key='interval')
             self.assertIn('repeated 2 times', self.text())
             self.assertIn('15.0s', self.text())
             for invalid in (True, 0, 3601, '60'):
                 with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                    utils.configure_logging(65536, 1, repeat_seconds=invalid)
-                self.assertEqual(utils._WARNING_REPEAT_SECONDS, 15)
-                self.assertEqual(utils._LOG_MAX_BYTES, 5 * 1024 * 1024)
+                    app_logging.configure_logging(65536, 1, repeat_seconds=invalid)
+                self.assertEqual(app_logging._WARNING_REPEAT_SECONDS, 15)
+                self.assertEqual(app_logging._LOG_MAX_BYTES, 5 * 1024 * 1024)
 
     def test_keyed_warning_summaries_count_repeats_at_interval_boundaries(self):
-        with patch.object(utils.time, 'monotonic', return_value=100) as timer:
-            utils.log_warning('Recurring warning', 'sample', once_key='recurring')
+        with patch.object(app_logging.time, 'monotonic', return_value=100) as timer:
+            app_logging.log_warning('Recurring warning', 'sample', once_key='recurring')
             for instant in (110, 120, 159):
                 timer.return_value = instant
-                utils.log_warning('Recurring warning', 'sample', once_key='recurring')
+                app_logging.log_warning('Recurring warning', 'sample', once_key='recurring')
             self.assertEqual(self.text().count('[WARNING]'), 1)
             timer.return_value = 160
-            utils.log_warning('Recurring warning', 'sample', once_key='recurring')
+            app_logging.log_warning('Recurring warning', 'sample', once_key='recurring')
             self.assertIn('repeated 4 times', self.text())
             timer.return_value = 161
-            utils.log_warning('Recurring warning', 'sample', once_key='recurring')
+            app_logging.log_warning('Recurring warning', 'sample', once_key='recurring')
             timer.return_value = 220
-            utils.log_warning('Recurring warning', 'sample', once_key='recurring')
+            app_logging.log_warning('Recurring warning', 'sample', once_key='recurring')
         self.assertEqual(self.text().count('[WARNING]'), 3)
         self.assertIn('repeated 2 times', self.text())
         self.assertIn('60.0s', self.text())
 
     def test_final_summary_keeps_original_context_and_masks_secrets(self):
-        with patch.object(utils.time, 'monotonic', return_value=100):
+        with patch.object(app_logging.time, 'monotonic', return_value=100):
             for tid, attempt in (('T1', 1), ('T2', 2)):
-                with utils.log_context(task=tid, attempt=attempt, stage='download'):
+                with app_logging.log_context(task=tid, attempt=attempt, stage='download'):
                     for _ in range(3):
-                        utils.log_warning('Secret warning', 'https://example.com/?token=private-token',
+                        app_logging.log_warning('Secret warning', 'https://example.com/?token=private-token',
                                           once_key='same', event='extractor_warning', component='yt-dlp')
             for _ in range(2):
-                utils.log_warning('Global warning', 'sample', once_key='global')
-            utils.flush_warning_summaries(task='T1', attempt=1)
+                app_logging.log_warning('Global warning', 'sample', once_key='global')
+            app_logging.flush_warning_summaries(task='T1', attempt=1)
             self.assertEqual(self.text().count('repeated 2 times'), 1)
-            with utils.log_context(task='UNRELATED', attempt=99, stage='trim'):
-                utils.flush_warning_summaries()
-            utils.flush_warning_summaries()  # Completed summaries must not be emitted twice.
+            with app_logging.log_context(task='UNRELATED', attempt=99, stage='trim'):
+                app_logging.flush_warning_summaries()
+            app_logging.flush_warning_summaries()  # Completed summaries must not be emitted twice.
         summaries = [line for line in self.text().splitlines() if '(repeated' in line]
         self.assertEqual(len(summaries), 3)
         self.assertIn('[task=T1] [attempt=1] [stage=download]', summaries[0])
@@ -110,40 +112,40 @@ class ErrorReportingTests(unittest.TestCase):
         self.assertIn('[REDACTED]', self.text())
 
     def test_concurrent_repeats_are_counted_exactly(self):
-        with patch.object(utils.time, 'monotonic', return_value=100):
+        with patch.object(app_logging.time, 'monotonic', return_value=100):
             with ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(lambda _: utils.log_warning('Concurrent warning', 'sample', once_key='same'),
+                list(pool.map(lambda _: app_logging.log_warning('Concurrent warning', 'sample', once_key='same'),
                               range(80)))
-            utils.flush_warning_summaries()
+            app_logging.flush_warning_summaries()
         self.assertEqual(self.text().count('[WARNING]'), 2)
         self.assertIn('repeated 79 times', self.text())
 
     def test_cache_eviction_flushes_oldest_summary_without_resetting_other_keys(self):
-        with patch.object(utils, '_WARNING_CACHE_LIMIT', 2), \
-                patch.object(utils.time, 'monotonic', return_value=100):
+        with patch.object(app_logging, '_WARNING_CACHE_LIMIT', 2), \
+                patch.object(app_logging.time, 'monotonic', return_value=100):
             for key in ('first', 'second'):
                 for _ in range(2):
-                    utils.log_warning(key, 'sample', once_key=key)
-            utils.log_warning('third', 'sample', once_key='third')
+                    app_logging.log_warning(key, 'sample', once_key=key)
+            app_logging.log_warning('third', 'sample', once_key='third')
             self.assertIn('WARNING first (repeated 1 times)', self.text())
-            utils.log_warning('second', 'sample', once_key='second')
-            utils.flush_warning_summaries()
+            app_logging.log_warning('second', 'sample', once_key='second')
+            app_logging.flush_warning_summaries()
         self.assertIn('WARNING second (repeated 2 times)', self.text())
         self.assertEqual(self.text().count('[WARNING]'), 5)
 
     def test_failed_first_write_does_not_suppress_next_warning(self):
-        with patch.object(utils, 'log_error', side_effect=[False, True]) as write:
-            utils.log_warning('Warning', 'sample', once_key='key')
-            utils.log_warning('Warning', 'sample', once_key='key')
+        with patch.object(app_logging, 'log_error', side_effect=[False, True]) as write:
+            app_logging.log_warning('Warning', 'sample', once_key='key')
+            app_logging.log_warning('Warning', 'sample', once_key='key')
         self.assertEqual(write.call_count, 2)
 
     def test_failed_summary_write_preserves_pending_count_for_retry(self):
-        with patch.object(utils.time, 'monotonic', return_value=100):
+        with patch.object(app_logging.time, 'monotonic', return_value=100):
             for _ in range(3):
-                utils.log_warning('Warning', 'sample', once_key='key')
-            with patch.object(utils, 'log_error', return_value=False):
-                utils.flush_warning_summaries()
-            utils.flush_warning_summaries()
+                app_logging.log_warning('Warning', 'sample', once_key='key')
+            with patch.object(app_logging, 'log_error', return_value=False):
+                app_logging.flush_warning_summaries()
+            app_logging.flush_warning_summaries()
         self.assertIn('repeated 2 times', self.text())
         self.assertEqual(self.text().count('[WARNING]'), 2)
 
@@ -154,7 +156,7 @@ class ErrorReportingTests(unittest.TestCase):
 
         def execute(*_):
             for _ in range(2):
-                utils.log_warning('Task warning', 'sample', once_key='key')
+                app_logging.log_warning('Task warning', 'sample', once_key='key')
             raise RuntimeError('unexpected task failure')
 
         with patch.object(manager.engine, '_process_task_attempt', side_effect=execute):
@@ -162,29 +164,29 @@ class ErrorReportingTests(unittest.TestCase):
                 manager.engine.process_task((tid, url), 1)
         summary = next(line for line in self.text().splitlines() if '(repeated' in line)
         self.assertIn('[task=T1] [attempt=1] [stage=resolve]', summary)
-        self.assertFalse(utils._WARNING_STATES)
+        self.assertFalse(app_logging._WARNING_STATES)
 
     def test_unexpected_runtime_and_value_errors_keep_tracebacks(self):
-        self.assertIsNone(utils.unexpected_traceback())
+        self.assertIsNone(app_logging.unexpected_traceback())
         for error_type in (RuntimeError, ValueError):
             with self.subTest(error_type=error_type):
                 try:
                     raise error_type('unexpected internal failure')
                 except error_type:
-                    details = utils.unexpected_traceback()
+                    details = app_logging.unexpected_traceback()
                 self.assertIn('Traceback (most recent call last)', details)
                 self.assertIn('test_unexpected_runtime_and_value_errors_keep_tracebacks', details)
                 self.assertIn(f'{error_type.__name__}: unexpected internal failure', details)
 
     def test_only_explicit_operation_and_ytdlp_errors_omit_tracebacks(self):
-        for error_type in (MediaOperationError, utils.InsufficientDiskSpace, YtDlpProcessError):
+        for error_type in (MediaOperationError, errors.InsufficientDiskSpace, YtDlpProcessError):
             with self.subTest(error_type=error_type):
                 self.assertTrue(issubclass(error_type, RuntimeError) or error_type is YtDlpProcessError)
                 try:
                     raise error_type('expected operation failure')
                 except error_type:
-                    self.assertIsNone(utils.unexpected_traceback())
-        utils.log_warning('External warning', 'plain warning text')
+                    self.assertIsNone(app_logging.unexpected_traceback())
+        app_logging.log_warning('External warning', 'plain warning text')
         self.assertNotIn('traceback:', self.text())
 
     def test_warning_uses_supplied_exception_traceback_outside_its_handler(self):
@@ -198,7 +200,7 @@ class ErrorReportingTests(unittest.TestCase):
         try:
             raise ValueError('unrelated handler')
         except ValueError:
-            utils.log_warning('Deferred failure', saved_error)
+            app_logging.log_warning('Deferred failure', saved_error)
         text = self.text()
         self.assertIn('fail_originally', text)
         self.assertIn('RuntimeError: original diagnostic', text)
@@ -228,7 +230,7 @@ class ErrorReportingTests(unittest.TestCase):
         manager.engine = DownloadEngine(manager, ffmpeg='ffmpeg', ffprobe='ffprobe')
         return manager
 
-    @patch.object(utils, '_LOG_DEBUG', True)
+    @patch.object(app_logging, '_LOG_DEBUG', True)
     def test_retry_keeps_task_identity_and_increments_attempt_without_context_leak(self):
         manager = self.make_logging_manager()
         url = 'https://example.com/retry'
@@ -236,7 +238,7 @@ class ErrorReportingTests(unittest.TestCase):
 
         def execute(task, worker):
             manager.set_log_stage(tid, 'download')
-            utils.log_warning('retry warning', RuntimeError('sample'), once_key='same-warning')
+            app_logging.log_warning('retry warning', RuntimeError('sample'), once_key='same-warning')
             manager.fail_task(tid, 'sample failure')
 
         with patch.object(manager.engine, '_process_task_attempt', side_effect=execute):
@@ -244,7 +246,7 @@ class ErrorReportingTests(unittest.TestCase):
             manager.retry_failed([tid])
             self.assertEqual(manager.get_task(tid)['attempt'], 1)  # Queuing is not execution.
             manager._process_task((tid, url), 2)
-        utils.log_error('outside task')
+        app_logging.log_error('outside task')
         headers = [line for line in (self.debug_text() + self.text()).splitlines() if line.startswith('[')]
         for attempt in (1, 2):
             records = [line for line in headers if f'[attempt={attempt}]' in line]
@@ -264,13 +266,13 @@ class ErrorReportingTests(unittest.TestCase):
 
         def download(tid, key, *args, **kwargs):
             barrier.wait(timeout=5)
-            utils.log_warning(f'stream-{tid}-{key}', RuntimeError('stream diagnostic'))
+            app_logging.log_warning(f'stream-{tid}-{key}', RuntimeError('stream diagnostic'))
             return str(self.folder / f'{tid}-{key}')
 
         def execute(tid):
             attempt = manager.begin_task_attempt(tid)
             manager.set_log_stage(tid, 'download')
-            with utils.log_context(lambda: manager.task_log_fields(tid), attempt=attempt):
+            with app_logging.log_context(lambda: manager.task_log_fields(tid), attempt=attempt):
                 manager.engine._download_streams_parallel(tid, 'url', Mock(), Mock(),
                                                           'video', 'audio', folder=str(self.folder))
 
@@ -286,7 +288,7 @@ class ErrorReportingTests(unittest.TestCase):
                 self.assertIn('[attempt=1]', header)
                 self.assertIn('[stage=download]', header)
 
-    @patch.object(utils, '_LOG_DEBUG', True)
+    @patch.object(app_logging, '_LOG_DEBUG', True)
     def test_stage_transitions_ignore_delayed_progress_and_log_once(self):
         manager = self.make_logging_manager()
         tid = manager.add_urls(['https://example.com/stages'], TaskOptions(folder=str(self.folder)))[0]
@@ -300,18 +302,18 @@ class ErrorReportingTests(unittest.TestCase):
         self.assertNotIn('[event=task_stage_changed]', self.text())
 
     def test_cleanup_scope_restores_failure_stage_even_after_exception(self):
-        with utils.log_context(task='T1', attempt=3, stage='convert'):
+        with app_logging.log_context(task='T1', attempt=3, stage='convert'):
             with self.assertRaises(RuntimeError):
-                with utils.log_context(stage='cleanup'):
-                    utils.log_error('cleanup failure')
+                with app_logging.log_context(stage='cleanup'):
+                    app_logging.log_error('cleanup failure')
                     raise RuntimeError('cleanup failed')
-            utils.log_error('conversion failure')
+            app_logging.log_error('conversion failure')
         headers = [line for line in self.text().splitlines() if line.startswith('[')]
         self.assertIn('[stage=cleanup]', headers[0])
         self.assertIn('[stage=convert]', headers[1])
         self.assertTrue(all('[task=T1]' in line and '[attempt=3]' in line for line in headers))
 
-    @patch.object(utils, '_LOG_DEBUG', True)
+    @patch.object(app_logging, '_LOG_DEBUG', True)
     def test_severity_is_explicit_and_independent_of_message(self):
         downloader.log_error('WARNING is only message text')
         for level in ('debug', 'info', 'warning', 'error', 'critical'):
@@ -326,29 +328,29 @@ class ErrorReportingTests(unittest.TestCase):
         self.assertIn('[INFO]', debug_headers[1])
         self.assertNotIn('[INFO]', self.text())
 
-    @patch.object(utils, '_LOG_DEBUG', False)
+    @patch.object(app_logging, '_LOG_DEBUG', False)
     def test_explicitly_disabled_debug_skips_context_and_file_writes(self):
-        with utils.log_context(Mock(side_effect=AssertionError('filtered debug must not read context'))), \
-                patch.object(utils, '_write_log', side_effect=AssertionError('filtered debug must not write')):
-            self.assertTrue(utils.log_error('Task stage changed', level='DEBUG'))
+        with app_logging.log_context(Mock(side_effect=AssertionError('filtered debug must not read context'))), \
+                patch.object(app_logging, '_write_log', side_effect=AssertionError('filtered debug must not write')):
+            self.assertTrue(app_logging.log_error('Task stage changed', level='DEBUG'))
         self.assertFalse(self.log.exists())
-        utils.log_warning('Visible warning', 'sample')
-        utils.log_error('Visible error')
+        app_logging.log_warning('Visible warning', 'sample')
+        app_logging.log_error('Visible error')
         self.assertIn('[WARNING]', self.text())
         self.assertIn('[ERROR]', self.text())
 
     def test_debug_failure_does_not_change_the_error_log_destination(self):
-        utils.log_error('error destination')
-        before = utils.get_log_status()
-        original = utils._write_log
+        app_logging.log_error('error destination')
+        before = app_logging.get_log_status()
+        original = app_logging._write_log
         def fail_debug_primary(path, block):
             if path == str(self.folder / 'debug.log'):
                 raise PermissionError('debug unavailable')
             return original(path, block)
-        with patch.object(utils, '_write_log', side_effect=fail_debug_primary), \
+        with patch.object(app_logging, '_write_log', side_effect=fail_debug_primary), \
                 patch.object(sys, 'stderr', io.StringIO()):
-            self.assertTrue(utils.log_error('debug fallback', level='INFO'))
-        self.assertEqual(utils.get_log_status(), before)
+            self.assertTrue(app_logging.log_error('debug fallback', level='INFO'))
+        self.assertEqual(app_logging.get_log_status(), before)
         self.assertIn('debug fallback', (self.folder / 'debug-fallback.log').read_text(encoding='utf-8'))
         self.assertNotIn('debug fallback', self.text())
 
@@ -359,7 +361,7 @@ class ErrorReportingTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
     def test_warning_helper_forwards_context_and_explicit_severity(self):
-        utils.log_warning('Plain warning', RuntimeError('failure'),
+        app_logging.log_warning('Plain warning', RuntimeError('failure'),
                           event='metadata_failed', component='download_engine')
         text = self.text()
         self.assertIn('[WARNING]', text)
@@ -378,10 +380,10 @@ class ErrorReportingTests(unittest.TestCase):
 
     def test_ytdlp_warnings_are_logged_once_and_secrets_are_redacted(self):
         message = 'TikTok request failed: https://example.com/video?token=private-token'
-        with patch.object(utils, 'ERROR_LOG_FILE', str(self.log)), \
+        with patch.object(app_logging, 'ERROR_LOG_FILE', str(self.log)), \
                 patch.object(sys, 'stderr', io.StringIO()) as stderr:
             for _ in range(2):
-                utils._network_options(None)['logger'].warning(message)
+                download_support._network_options(None)['logger'].warning(message)
             self.assertEqual(stderr.getvalue(), '')
         text = self.text()
         self.assertEqual(text.count('WARNING yt-dlp'), 1)
@@ -427,8 +429,8 @@ class ErrorReportingTests(unittest.TestCase):
 
     def test_rotation_bounds_archives_and_preserves_latest_record(self):
         for level, path in (('ERROR', self.log), ('INFO', self.folder / 'debug.log')):
-            with self.subTest(level=level), patch.object(utils, '_LOG_MAX_BYTES', 1500), \
-                    patch.object(utils, '_LOG_BACKUP_COUNT', 2):
+            with self.subTest(level=level), patch.object(app_logging, '_LOG_MAX_BYTES', 1500), \
+                    patch.object(app_logging, '_LOG_BACKUP_COUNT', 2):
                 for index in range(40):
                     downloader.log_error(f'failure-{index}', level=level, details=[('program', 'x' * 200)])
                 self.assertIn('failure-39', path.read_text(encoding='utf-8'))
@@ -450,7 +452,7 @@ class ErrorReportingTests(unittest.TestCase):
     def test_unhandled_thread_and_main_errors_are_logged_and_hooks_chain(self):
         with patch.object(sys, 'excepthook') as original_sys, \
                 patch.object(threading, 'excepthook') as original_thread:
-            utils.install_exception_hooks()
+            app_logging.install_exception_hooks()
             try:
                 raise ValueError('unhandled failure')
             except ValueError as error:

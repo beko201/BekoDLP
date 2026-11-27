@@ -13,7 +13,8 @@ from errors import MediaOperationError
 from media_processing import ConfiguredOutput
 from media_sources import SourcePreparer
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled, InsufficientDiskSpace, NO_WINDOW
+from errors import DownloadCancelled, InsufficientDiskSpace
+from process_utils import NO_WINDOW
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe required")

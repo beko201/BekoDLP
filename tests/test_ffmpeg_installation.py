@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from tools.install_ffmpeg import VERSION, validate_members, replace_directory
-import utils
+import runtime_tools
 
 
 class PortableFFmpegTests(unittest.TestCase):
@@ -35,13 +35,13 @@ class PortableFFmpegTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'Windows portable runtime')
     def test_app_local_tool_takes_precedence_over_an_older_system_install(self):
-        with patch('utils.os.path.isfile', return_value=True), \
-                patch('utils.shutil.which', return_value='C:/old/ffmpeg.exe') as system:
-            result = utils.which_executable(['ffmpeg', 'ffmpeg.exe'])
+        with patch('runtime_tools.os.path.isfile', return_value=True), \
+                patch('runtime_tools.shutil.which', return_value='C:/old/ffmpeg.exe') as system:
+            result = runtime_tools.which_executable(['ffmpeg', 'ffmpeg.exe'])
         self.assertTrue(result.endswith(os.path.join('tools', 'runtime', 'ffmpeg', 'bin', 'ffmpeg.exe')))
         system.assert_not_called()
 
     def test_missing_portable_build_keeps_system_tool_fallback(self):
-        with patch('utils.os.path.isfile', return_value=False), \
-                patch('utils.shutil.which', return_value='C:/system/ffprobe.exe'):
-            self.assertEqual(utils.which_executable(['ffprobe']), 'C:/system/ffprobe.exe')
+        with patch('runtime_tools.os.path.isfile', return_value=False), \
+                patch('runtime_tools.shutil.which', return_value='C:/system/ffprobe.exe'):
+            self.assertEqual(runtime_tools.which_executable(['ffprobe']), 'C:/system/ffprobe.exe')

@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import Mock
 
 from task_manager import TaskManager, TaskOptions
-from utils import normalize_url
+from url_utils import normalize_url
 
 
 class NormalizeUrlTests(unittest.TestCase):

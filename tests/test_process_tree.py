@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import process_tree
 from process_tree import spawn_owned_process
-from utils import NO_WINDOW, psutil
+from process_utils import NO_WINDOW, psutil
 
 
 class ProcessTreeTests(unittest.TestCase):
@@ -90,7 +90,9 @@ class ProcessTreeTests(unittest.TestCase):
     @unittest.skipUnless(os.name == 'nt', 'Windows Job Object regression')
     def test_force_cleanup_includes_job_whose_original_parent_already_exited(self):
         import threading
-        from download_engine import DownloadEngine
+        from engine_runtime import EngineRuntime
+        from engine_processes import MediaProcesses
+        from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as folder:
             pidfile = Path(folder) / 'child.pid'
             script = ('import subprocess,sys; from pathlib import Path; '
@@ -102,9 +104,8 @@ class ProcessTreeTests(unittest.TestCase):
             try:
                 proc.wait(5)
                 child = psutil.Process(int(pidfile.read_text()))
-                engine = DownloadEngine.__new__(DownloadEngine)
-                engine.resource_lock = threading.Lock()
-                engine.managed_processes = {proc}
+                runtime = EngineRuntime(ffmpeg=None, ffprobe=None, managed_processes={proc})
+                engine = MediaProcesses(runtime, Mock(), Mock())
                 engine.terminate_managed_processes()
                 child.wait(3)
                 self.assertFalse(child.is_running())

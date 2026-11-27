@@ -15,7 +15,7 @@ from media_sources import SourcePreparer, read_ebml_doctype, read_mp4_faststart
 from errors import MediaOperationError
 from settings import validate_settings
 from task_manager import TaskManager, TaskOptions
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 class ProfileValidationTests(unittest.TestCase):

@@ -12,7 +12,9 @@ from unittest.mock import Mock, patch
 import download_engine
 from task_manager import TaskManager, TaskOptions
 from test_shutdown import wait_until
-import utils
+import app_logging
+import errors
+import process_utils
 
 
 class ShutdownDeadlineTests(unittest.TestCase):
@@ -20,7 +22,7 @@ class ShutdownDeadlineTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.folder = Path(temp.name)
-        log_patch = patch.object(utils, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
+        log_patch = patch.object(app_logging, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
         log_patch.start()
         self.addCleanup(log_patch.stop)
         self.manager = TaskManager(engine_factory=lambda manager: Mock())
@@ -56,7 +58,7 @@ class ShutdownDeadlineTests(unittest.TestCase):
             self.engine._register_process(proc)
 
         with self.assertRaises(subprocess.CalledProcessError) as error:
-            utils.run_cmd_capture([sys.executable, '-c', "import sys; print('diagnostic'); sys.exit(3)"],
+            process_utils.run_cmd_capture([sys.executable, '-c', "import sys; print('diagnostic'); sys.exit(3)"],
                                   on_start=register, on_finish=self.engine._unregister_process)
         self.assertIn('diagnostic', error.exception.output)
         self.assertEqual(self.engine.managed_processes, set())
@@ -70,7 +72,7 @@ class ShutdownDeadlineTests(unittest.TestCase):
             self.engine._register_process(proc)
 
         with self.assertRaises(subprocess.TimeoutExpired):
-            utils.run_cmd_capture([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=0.1,
+            process_utils.run_cmd_capture([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=0.1,
                                   on_start=register, on_finish=self.engine._unregister_process)
         self.assertIsNotNone(processes[0].poll())
         self.assertTrue(processes[0].stdout.closed)
@@ -88,7 +90,7 @@ class ShutdownDeadlineTests(unittest.TestCase):
 
         def run():
             try:
-                utils.run_cmd_capture([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=60,
+                process_utils.run_cmd_capture([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=60,
                                       on_start=register, on_finish=self.engine._unregister_process)
             except BaseException as error:
                 results.append(error)
@@ -117,8 +119,8 @@ class ShutdownDeadlineTests(unittest.TestCase):
             processes.append(proc)
             self.engine._register_process(proc)
 
-        with self.assertRaises(utils.DownloadCancelled):
-            utils.run_cmd_capture([sys.executable, '-c', 'import time; time.sleep(60)'],
+        with self.assertRaises(errors.DownloadCancelled):
+            process_utils.run_cmd_capture([sys.executable, '-c', 'import time; time.sleep(60)'],
                                   on_start=register, on_finish=self.engine._unregister_process)
         self.assertIsNotNone(processes[0].poll())
         self.assertEqual(self.engine.managed_processes, set())
@@ -151,14 +153,14 @@ class ShutdownDeadlineTests(unittest.TestCase):
             self.assertTrue(entered.wait(2))
             with self.engine.resource_lock:
                 process = next(iter(self.engine.managed_processes))
-            utils.psutil.Process(process.pid).suspend()
+            process_utils.psutil.Process(process.pid).suspend()
             self.manager.close()
             self.escalate()
             wait_until(lambda: process.poll() is not None)
             release.set()
             thread.join(2)
         self.assertFalse(thread.is_alive())
-        self.assertIsInstance(results[0], utils.DownloadCancelled)
+        self.assertIsInstance(results[0], errors.DownloadCancelled)
         self.assertEqual(self.engine.managed_processes, set())
         self.assertEqual(self.engine.current_process_pids, {})
 

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import test_task_cleanup as cleanup_fixture
+from media_sources import SourcePreparer
 
 
 downloader = cleanup_fixture.downloader
@@ -64,13 +65,15 @@ class ResolutionCapTests(unittest.TestCase):
                 app = cleanup_fixture.TaskCleanupTests.make_app(self, Path(temp), 'MP4', codec)
                 app.tasks['T1']['quality'] = '480p'
                 app._download_format = Mock()
-                app._complete_via_selector = Mock(side_effect=RuntimeError('no eligible format'))
                 info = downloader.YTInfo('url', {'formats': [video_format(1080), AUDIO]})
-                with patch.object(downloader, 'fetch_ytinfo_with_retry', return_value=info):
+                with patch.object(downloader, 'fetch_ytinfo_with_retry', return_value=info), \
+                        patch.object(SourcePreparer, '_selector', autospec=True,
+                                     side_effect=RuntimeError('no eligible format')) as fallback:
                     app._process_task(('T1', 'url'), 1)
                 app._download_format.assert_not_called()
-                app._complete_via_selector.assert_called_once()
-                self.assertEqual(app._complete_via_selector.call_args.args[6], 480)
+                fallback.assert_called_once()
+                task = fallback.call_args.args[5]
+                self.assertEqual(SourcePreparer.selector_expression(task), 'bv*[height<=480]+ba/b[height<=480]')
 
     def test_real_ytdlp_selector_never_uses_unbounded_fallback(self):
         for force_h264 in (False, True):

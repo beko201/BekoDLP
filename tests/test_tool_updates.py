@@ -14,7 +14,8 @@ import zipfile
 import app_paths
 import tool_updates as updates
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled, which_executable, portable_deno_path
+from errors import DownloadCancelled
+from runtime_tools import which_executable, portable_deno_path
 
 
 def pe_payload():
@@ -224,3 +225,46 @@ class ToolUpdateTests(unittest.TestCase):
         opener.open.return_value = Response(b'x' * 100)
         with patch.object(updates, 'build_opener', return_value=opener), self.assertRaises(DownloadCancelled):
             updates.read_url('https://github.com/fixture', cancel=cancelled, limit=100)
+
+    def test_latest_release_requests_json_instead_of_binary_media(self):
+        from unittest.mock import Mock
+        from urllib.error import HTTPError
+        release, _, data = release_fixture('deno')
+        url = 'https://api.github.com/repos/denoland/deno/releases/latest'
+        payload = json.dumps(data).encode('utf-8')
+
+        class Response(io.BytesIO):
+            headers = {'Content-Length': str(len(payload))}
+            def geturl(self):
+                return url
+
+        def serve(request, **kwargs):
+            if request.get_header('Accept') != 'application/vnd.github+json':
+                raise HTTPError(url, 415, 'Unsupported Media Type', {}, None)
+            return Response(payload)
+
+        opener = Mock()
+        opener.open.side_effect = serve
+        with patch.object(updates, 'build_opener', return_value=opener):
+            self.assertEqual(updates.latest_release('deno', threading.Event()), release)
+
+    def test_binary_download_keeps_octet_stream_accept_header(self):
+        from unittest.mock import Mock
+        url = 'https://github.com/fixture/tool.exe'
+        payload = b'fixture executable'
+
+        class Response(io.BytesIO):
+            headers = {'Content-Length': str(len(payload))}
+            def geturl(self):
+                return url
+
+        opener = Mock()
+        opener.open.return_value = Response(payload)
+        output = io.BytesIO()
+        with patch.object(updates, 'build_opener', return_value=opener):
+            digest = updates.read_url(url, cancel=threading.Event(), limit=100,
+                                      expected=len(payload), output=output)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.get_header('Accept'), 'application/octet-stream')
+        self.assertEqual(output.getvalue(), payload)
+        self.assertEqual(digest, hashlib.sha256(payload).hexdigest())

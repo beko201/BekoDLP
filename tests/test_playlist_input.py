@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 import download_engine
 from task_manager import PlaylistFetcher, TaskManager, TaskOptions
-from utils import DownloadCancelled, PlaylistLinkNotAllowed
+from errors import DownloadCancelled, PlaylistLinkNotAllowed
 
 
 class PlaylistInputTests(unittest.TestCase):

@@ -22,7 +22,7 @@ from ui.bulk_add_dialog import BulkAddDialog
 from ui.main_window import MainWindow
 from qt_support import finish_window_close
 from ui.playlist_selection import PlaylistModel, PlaylistSelectionDialog
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 
 
 def entry(number, **kwargs):

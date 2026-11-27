@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import patch
 
 import diagnostics
-import utils
+import app_logging
+import app_paths
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -19,7 +20,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.fallback.parent.mkdir()
         for name, value in (('ERROR_LOG_FILE', str(self.primary)),
                             ('FALLBACK_ERROR_LOG_FILE', str(self.fallback)), ('_LOG_STATE', None)):
-            patcher = patch.object(utils, name, value)
+            patcher = patch.object(app_logging, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -29,31 +30,31 @@ class DiagnosticsTests(unittest.TestCase):
         return self.write_log(path, block)
 
     def test_destination_tracks_fallback_and_returns_to_primary_after_recovery(self):
-        self.write_log = utils._write_log
-        with patch.object(utils, '_write_log', side_effect=self.fail_primary), \
-                patch.object(utils.sys, 'stderr', None), patch.object(utils.sys, '__stderr__', None):
-            self.assertTrue(utils.log_error('fallback diagnostic'))
-        self.assertEqual(utils.get_log_status()['path'], str(self.fallback))
-        self.assertIn(f'Fallback log file: {self.fallback}', utils.log_location_text())
-        self.assertTrue(utils.log_error('primary recovered'))
-        self.assertEqual(utils.get_log_status()['path'], str(self.primary))
-        self.assertFalse(utils.get_log_status()['write_failed'])
+        self.write_log = app_logging._write_log
+        with patch.object(app_logging, '_write_log', side_effect=self.fail_primary), \
+                patch.object(app_logging.sys, 'stderr', None), patch.object(app_logging.sys, '__stderr__', None):
+            self.assertTrue(app_logging.log_error('fallback diagnostic'))
+        self.assertEqual(app_logging.get_log_status()['path'], str(self.fallback))
+        self.assertIn(f'Fallback log file: {self.fallback}', app_logging.log_location_text())
+        self.assertTrue(app_logging.log_error('primary recovered'))
+        self.assertEqual(app_logging.get_log_status()['path'], str(self.primary))
+        self.assertFalse(app_logging.get_log_status()['write_failed'])
 
     def test_no_working_sink_is_reported_without_claiming_the_error_was_saved(self):
-        with patch.object(utils, '_write_log', side_effect=PermissionError('no writes')), \
-                patch.object(utils.sys, 'stderr', None), patch.object(utils.sys, '__stderr__', None):
-            self.assertFalse(utils.log_error('unsaved diagnostic'))
-        self.assertTrue(utils.get_log_status()['write_failed'])
-        self.assertIsNone(utils.get_log_status()['path'])
-        self.assertIn('could not be saved', utils.log_location_text())
+        with patch.object(app_logging, '_write_log', side_effect=PermissionError('no writes')), \
+                patch.object(app_logging.sys, 'stderr', None), patch.object(app_logging.sys, '__stderr__', None):
+            self.assertFalse(app_logging.log_error('unsaved diagnostic'))
+        self.assertTrue(app_logging.get_log_status()['write_failed'])
+        self.assertIsNone(app_logging.get_log_status()['path'])
+        self.assertIn('could not be saved', app_logging.log_location_text())
         self.assertIn('No log could be saved', diagnostics.build_diagnostic_report())
 
     def test_report_uses_actual_fallback_and_redacts_legacy_log_and_details(self):
         self.primary.write_text('STALE PRIMARY', encoding='utf-8')
-        self.write_log = utils._write_log
-        with patch.object(utils, '_write_log', side_effect=self.fail_primary), \
-                patch.object(utils.sys, 'stderr', None), patch.object(utils.sys, '__stderr__', None):
-            utils.log_error('CURRENT FALLBACK')
+        self.write_log = app_logging._write_log
+        with patch.object(app_logging, '_write_log', side_effect=self.fail_primary), \
+                patch.object(app_logging.sys, 'stderr', None), patch.object(app_logging.sys, '__stderr__', None):
+            app_logging.log_error('CURRENT FALLBACK')
         with self.fallback.open('a', encoding='utf-8') as stream:
             stream.write('https://example.com/?token=legacy-secret\nCookie: legacy-cookie\n')
         report = diagnostics.build_diagnostic_report('Authorization: Bearer detail-secret',
@@ -89,8 +90,8 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_export_cannot_overwrite_runtime_logs_or_archives(self):
         self.primary.write_text('Keep original', encoding='utf-8')
-        for path in (self.primary, self.fallback, Path(str(self.primary) + '.1'), utils.SETTINGS_FILE,
-                     utils.DEBUG_LOG_FILE, utils.FALLBACK_DEBUG_LOG_FILE, utils.DEBUG_LOG_FILE + '.1'):
+        for path in (self.primary, self.fallback, Path(str(self.primary) + '.1'), app_paths.SETTINGS_FILE,
+                     app_logging.DEBUG_LOG_FILE, app_logging.FALLBACK_DEBUG_LOG_FILE, app_logging.DEBUG_LOG_FILE + '.1'):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 diagnostics.save_diagnostic_report(path, 'Report')
         self.assertEqual(self.primary.read_text(encoding='utf-8'), 'Keep original')
@@ -110,7 +111,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn('<USER_HOME>', report)
         self.assertIn('clip.mp4', report)
         self.assertEqual(self.primary.read_text(encoding='utf-8'), raw_log)
-        self.assertEqual(utils.get_log_status()['path'], str(self.primary))
+        self.assertEqual(app_logging.get_log_status()['path'], str(self.primary))
 
     def test_custom_home_path_variants_are_masked_without_changing_web_urls(self):
         with patch.object(diagnostics.Path, 'home', return_value=Path(r'D:\Profiles\Jane Doe')):

@@ -21,7 +21,7 @@ from queue_store import QueueStore
 from task_manager import PlaylistFetcher, TaskManager, TaskOptions
 from ui.main_window import MainWindow
 from qt_support import finish_window_close
-from utils import _log_text
+from app_logging import _log_text
 from ytdlp_process import YtDlpProcess
 
 

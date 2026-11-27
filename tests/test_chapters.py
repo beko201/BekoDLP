@@ -23,7 +23,9 @@ from settings import DEFAULTS, validate_settings
 from task_manager import TaskManager, TaskOptions
 from ui.output_controls import OutputControls
 from ui.file_actions import reveal_file
-from utils import DownloadCancelled, NO_WINDOW, which_executable
+from errors import DownloadCancelled
+from process_utils import NO_WINDOW
+from runtime_tools import which_executable
 
 
 class ChapterTests(unittest.TestCase):

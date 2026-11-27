@@ -1,4 +1,5 @@
 """Real long-GOP cuts must not introduce silent preroll or A/V marker drift."""
+import app_logging
 from array import array
 from dataclasses import asdict
 import json
@@ -14,7 +15,8 @@ from unittest.mock import patch
 from errors import MediaOperationError
 from media_processing import ConfiguredOutput
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled, NO_WINDOW
+from errors import DownloadCancelled
+from process_utils import NO_WINDOW
 
 
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
@@ -48,7 +50,7 @@ class TrimSyncTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.folder = Path(temp.name)
-        log_patch = patch('utils.ERROR_LOG_FILE', str(self.folder / 'errors.log'))
+        log_patch = patch('app_logging.ERROR_LOG_FILE', str(self.folder / 'errors.log'))
         log_patch.start()
         self.addCleanup(log_patch.stop)
         self.manager = TaskManager()

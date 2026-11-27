@@ -13,14 +13,16 @@ from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from cookie_options import COOKIE_DEFAULTS, cookie_selection, validate_cookie_options
+from cookie_options import (COOKIE_DEFAULTS, cookie_selection, validate_cookie_options,
+                            cookie_error_guidance, BROWSER_COOKIE_COPY_HELP)
+from ui.i18n import language, set_language, tr
 import download_engine
 from queue_store import QueueStore
 from settings import validate_settings
 from task_manager import PlaylistFetcher, TaskManager, TaskOptions
 from ui.main_window import MainWindow
 from qt_support import finish_window_close
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 from ytdlp_process import YtDlpProcess, YtDlpProcessError
 
 
@@ -72,6 +74,28 @@ class CookieTests(unittest.TestCase):
             self.assertEqual(args, ['--cookies-from-browser', r'edge:C:\Browser Profiles\Profile 2'])
         with YtDlpProcess()._cookie_arguments() as args:
             self.assertEqual(args, [])
+
+    def test_cookie_copy_error_has_specific_help_and_unrelated_errors_do_not(self):
+        message = 'yt-dlp failed: ERROR: Could not copy Chrome cookie database.'
+        self.assertEqual(cookie_error_guidance(message), BROWSER_COOKIE_COPY_HELP)
+        self.assertEqual(cookie_error_guidance('HTTP Error 403: Forbidden'), '')
+        self.assertEqual(cookie_error_guidance('Permission denied: output.mp4'), '')
+
+    def test_cookie_copy_help_is_localized_without_changing_cookie_settings(self):
+        previous = language()
+        self.addCleanup(set_language, previous)
+        window, manager = self.window()
+        selection = dict(COOKIE_DEFAULTS, cookie_mode='browser', cookie_browser='chrome')
+        window.output_controls.cookies.restore(selection)
+        original = cookie_selection(window.output_controls.values())
+        set_language('tr')
+        error = 'yt-dlp failed: ERROR: Could not copy Chrome cookie database.'
+        window._show_message('critical', 'Link resolution failed', 'Could not resolve the URL.', error)
+        box = next(iter(window._message_boxes))
+        self.assertEqual(box.text(), tr(BROWSER_COOKIE_COPY_HELP))
+        self.assertIn('arka plan işlemleri', box.text())
+        self.assertEqual(box.detailedText(), error)
+        self.assertEqual(cookie_selection(window.output_controls.values()), original)
 
     def test_each_process_uses_a_distinct_copy_and_never_changes_the_source(self):
         with YtDlpProcess(self.selection)._cookie_arguments() as first, \

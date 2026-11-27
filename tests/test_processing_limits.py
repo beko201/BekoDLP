@@ -8,7 +8,7 @@ from unittest.mock import patch
 from processing_limits import ProcessingLimits, budget_command, video_encoder
 from settings import DEFAULTS, validate_settings
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 
 
 def wait_until(predicate):

@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import download_engine
 from task_manager import TaskManager, TaskOptions
-import utils
+import app_logging
+import process_utils
 
 
 FFMPEG = shutil.which('ffmpeg')
@@ -45,7 +46,7 @@ class ContainerMergeTests(unittest.TestCase):
         self.folder = Path(temp.name)
         self.output = self.folder / 'output'
         self.output.mkdir()
-        log_patch = patch.object(utils, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
+        log_patch = patch.object(app_logging, 'ERROR_LOG_FILE', str(self.folder / 'errors.log'))
         log_patch.start()
         self.addCleanup(log_patch.stop)
         self.manager = TaskManager()
@@ -54,7 +55,7 @@ class ContainerMergeTests(unittest.TestCase):
 
     def run_media(self, args):
         return subprocess.run(args, check=True, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, **utils.NO_WINDOW).stdout
+                              stderr=subprocess.PIPE, **process_utils.NO_WINDOW).stdout
 
     def sources(self, video_codec='libx264', video_ext='mov', audio_codec='aac', audio_ext='m4a'):
         video = self.folder / ('video.' + video_ext)

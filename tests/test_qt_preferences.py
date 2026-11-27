@@ -64,7 +64,7 @@ class QtPreferencesTests(unittest.TestCase):
         self.assertEqual(saved["schema_version"], 1)
         self.assertEqual(saved["output_mode"], "video")
         self.assertEqual(saved["audio_codec"], "mp3")
-        self.assertEqual(saved["format"], "MP4")
+        self.assertNotIn('format', saved)
 
     def test_changes_are_debounced_and_close_flushes_pending_save(self):
         preferences = Preferences(self.path)

@@ -17,7 +17,7 @@ from media_options import OUTPUT_DEFAULTS
 from media_processing import ConfiguredOutput
 from media_sources import SourcePreparer
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 
 
 def document(duration="2"):

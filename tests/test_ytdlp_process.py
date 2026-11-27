@@ -12,7 +12,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import download_engine
-from utils import DownloadCancelled, psutil
+from errors import DownloadCancelled
+from process_utils import psutil
 from ytdlp_process import YtDlpProcess, YtDlpProcessError, kill_process_tree
 
 

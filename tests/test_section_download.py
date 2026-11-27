@@ -25,7 +25,9 @@ from section_download import SectionMetadata
 from settings import DEFAULTS
 from task_manager import TaskManager, TaskOptions
 from ui.output_controls import OutputControls
-from utils import DownloadCancelled, NO_WINDOW, which_executable
+from errors import DownloadCancelled
+from process_utils import NO_WINDOW
+from runtime_tools import which_executable
 from ytdlp_process import YtDlpProcess
 
 

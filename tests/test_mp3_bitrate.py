@@ -47,7 +47,7 @@ class MP3BitrateTests(unittest.TestCase):
             app.mp3_bitrate_var.get.side_effect = AssertionError('live UI bitrate must not be read again')
             with patch.object(downloader, '_extract_urls_from_input', return_value=['https://example.com/one']):
                 fetcher.run()
-            self.assertEqual(app.tasks['T1']['mp3_bitrate'], '128k')
+            self.assertEqual(app.tasks['T1']['audio_bitrate'], '128k')
             self.assertEqual(self.convert_in_worker(app, 'T1'), '128k')
             app.mp3_bitrate_var.get.assert_called_once()
 
@@ -67,7 +67,7 @@ class MP3BitrateTests(unittest.TestCase):
             app.mp3_bitrate_var.get.side_effect = ['256k', AssertionError('batch read bitrate twice')]
             self.add_urls(app, ['https://example.com/one', 'https://example.com/two'],
                                   'MP3', '1080p', 'Original (Automatic)')
-            self.assertEqual([t['mp3_bitrate'] for t in app.tasks.values()], ['256k', '256k'])
+            self.assertEqual([t['audio_bitrate'] for t in app.tasks.values()], ['256k', '256k'])
             app.mp3_bitrate_var.get.assert_called_once()
 
     def test_retry_preserves_original_bitrate(self):
@@ -76,7 +76,7 @@ class MP3BitrateTests(unittest.TestCase):
             self.add_urls(app, ['https://example.com/one'], 'MP3', '1080p', 'Original (Automatic)')
             app.task_queue.get_nowait()
             app.task_queue.task_done()
-            app.tasks['T1']['status'] = 'Error: network failure'
+            app.update_task('T1', state='failed', status='Error: network failure')
             app.active_urls.clear()
             app.tree.selection.return_value = ('T1',)
             app.mp3_bitrate_var.get.side_effect = AssertionError('retry must not read current bitrate')

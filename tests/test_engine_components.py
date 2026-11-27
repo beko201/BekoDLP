@@ -4,7 +4,7 @@ import subprocess
 import sys
 import unittest
 
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 class EngineComponentTests(unittest.TestCase):

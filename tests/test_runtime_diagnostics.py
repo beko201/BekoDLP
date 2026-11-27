@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 import diagnostics
-import utils
+import app_logging
+import runtime_tools
 from app_info import APP_VERSION
 
 
@@ -21,18 +22,18 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
         self.addCleanup(platform_patch.stop)
         for target, value in (('diagnostics._RUNTIME_INFO', None),
                               ('diagnostics._SESSION_LOGGED', False),
-                              ('utils.ERROR_LOG_FILE', str(self.folder / 'errors.log')),
-                              ('utils.DEBUG_LOG_FILE', str(self.folder / 'debug.log')),
-                              ('utils.FALLBACK_DEBUG_LOG_FILE', str(self.folder / 'debug-fallback.log')),
-                              ('utils.FALLBACK_ERROR_LOG_FILE', str(self.folder / 'fallback.log')),
-                              ('utils._LOG_STATE', None)):
+                              ('app_logging.ERROR_LOG_FILE', str(self.folder / 'errors.log')),
+                              ('app_logging.DEBUG_LOG_FILE', str(self.folder / 'debug.log')),
+                              ('app_logging.FALLBACK_DEBUG_LOG_FILE', str(self.folder / 'debug-fallback.log')),
+                              ('app_logging.FALLBACK_ERROR_LOG_FILE', str(self.folder / 'fallback.log')),
+                              ('app_logging._LOG_STATE', None)):
             patcher = patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
         version_patch = patch('ytdlp_process.executable_version', return_value='2026.10.26')
         version_patch.start()
         self.addCleanup(version_patch.stop)
-        runtime_patch = patch.object(utils, 'portable_deno_path', return_value='custom-deno/deno')
+        runtime_patch = patch.object(runtime_tools, 'portable_deno_path', return_value='custom-deno/deno')
         runtime_patch.start()
         self.addCleanup(runtime_patch.stop)
 
@@ -68,7 +69,7 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
 
     def test_failed_session_write_is_retried_without_reprobing(self):
         with patch.object(diagnostics.subprocess, 'run', side_effect=self.tool_output) as run, \
-                patch.object(utils, 'log_error', side_effect=[False, True]) as write:
+                patch.object(app_logging, 'log_error', side_effect=[False, True]) as write:
             diagnostics.initialize_runtime_diagnostics('ffmpeg', 'ffprobe')
             diagnostics.initialize_runtime_diagnostics('ffmpeg', 'ffprobe')
             diagnostics.initialize_runtime_diagnostics('ffmpeg', 'ffprobe')
@@ -90,8 +91,8 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
                 self.assertIn('Application:', report)
 
     def test_missing_tools_and_pyside_metadata_are_explicit(self):
-        with patch.object(utils, 'which_executable', return_value=None), \
-                patch.object(utils, 'portable_deno_path', return_value=None), \
+        with patch.object(runtime_tools, 'which_executable', return_value=None), \
+                patch.object(runtime_tools, 'portable_deno_path', return_value=None), \
                 patch.object(diagnostics.metadata, 'version', side_effect=diagnostics.metadata.PackageNotFoundError), \
                 patch.object(diagnostics.subprocess, 'run') as run:
             info = diagnostics.get_runtime_info()

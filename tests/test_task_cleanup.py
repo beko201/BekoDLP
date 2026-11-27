@@ -1,5 +1,6 @@
 import importlib.util
 import atexit
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 import threading
@@ -42,9 +43,25 @@ class TaskCleanupTests(unittest.TestCase):
         app._ffprobe_media = Mock(return_value={
             'format': {'format_name': 'mov,mp4,m4a,3gp,3g2,mj2', 'duration': '1',
                        'tags': {'major_brand': 'isom'}},
-            'streams': [{'codec_type': 'video', 'codec_name': 'h264'},
-                        {'codec_type': 'audio', 'codec_name': 'aac'}],
+            'streams': [{'index': 0, 'codec_type': 'video', 'codec_name': 'h264'},
+                        {'index': 1, 'codec_type': 'audio', 'codec_name': 'aac'}],
         })
+        # Placeholder files still expose the tracks of each source/output to
+        # the common planner; conversion itself remains controlled by each test.
+        def probe(path, **kwargs):
+            result = deepcopy(app._ffprobe_media.return_value)
+            path = Path(path)
+            if path.suffix in ('.m4a', '.mp3'):
+                result['streams'] = [{'index': 0, 'codec_type': 'audio',
+                                      'codec_name': 'mp3' if path.suffix == '.mp3' else 'aac'}]
+                if path.suffix == '.mp3':
+                    result['format'] = dict(format_name='mp3', duration=result['format']['duration'])
+            elif path.name == 'video.mp4':
+                result['streams'] = result['streams'][:1]
+            return result
+        app._ffprobe_media.side_effect = probe
+        app.available_encoders = Mock(return_value={'libmp3lame', 'libx264', 'aac'})
+        app._ffprobe_copy_start = Mock(side_effect=lambda path, index, start: start)
 
         def update(tid, **values):
             app.tasks[tid].update(values)
@@ -167,15 +184,15 @@ class TaskCleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
             app = self.make_app(folder)
-            actual_remove = downloader.os.remove
+            actual_remove = downloader.shutil.rmtree
             attempts = []
 
-            def remove(path):
-                if Path(path).name == 'Example.mp3':
+            def remove(path, *args, **kwargs):
+                if Path(path).name.startswith('.yd-'):
                     attempts.append(path)
                     if len(attempts) == 1:
                         raise PermissionError('temporarily locked')
-                return actual_remove(path)
+                return actual_remove(path, *args, **kwargs)
 
             def fail(tid, wid, cmd, **kwargs):
                 Path(cmd[-1]).write_bytes(b'incomplete')
@@ -183,7 +200,7 @@ class TaskCleanupTests(unittest.TestCase):
 
             app._run_ffmpeg = fail
             with patch.object(downloader, 'fetch_ytinfo_with_retry', return_value=self.info('mp3')):
-                with patch.object(downloader.os, 'remove', side_effect=remove):
+                with patch.object(downloader.shutil, 'rmtree', side_effect=remove):
                     app._process_task(('T1', 'https://example.com/video'), 1)
             self.assertEqual(len(attempts), 2)
             self.assertEqual(list(folder.iterdir()), [])

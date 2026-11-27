@@ -77,13 +77,14 @@ class OutputPlanTests(unittest.TestCase):
     def test_missing_required_audio_and_video_fail_before_encoder_resolution(self):
         for task, sources, error in (
                 (self.task(), self.sources(video=None), "no video"),
-                (self.task(audio_codec="aac"), self.sources(audio=None), "requires an audio"),
                 (self.task(output_mode="audio"), self.sources(audio=None), "requires an audio")):
             with self.subTest(task=task), self.assertRaisesRegex(RuntimeError, error):
                 build_output_plan(task, sources)
 
     def test_video_with_no_original_audio_is_valid_and_explicit_drop_removes_mapping(self):
         plan = build_output_plan(self.task(), self.sources(audio=None), set())
+        self.assertEqual(plan.audio.action, StreamAction.DROP)
+        plan = build_output_plan(self.task(audio_codec='aac'), self.sources(audio=None), set())
         self.assertEqual(plan.audio.action, StreamAction.DROP)
         sources = self.sources()
         plan = build_output_plan(self.task(audio_codec="none"), sources, set())

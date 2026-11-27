@@ -21,7 +21,7 @@ from task_manager import TaskManager, TaskOptions
 from ui.main_window import MainWindow
 from qt_support import finish_window_close
 from ui.task_controller import TaskController
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 class ControlledEngine:

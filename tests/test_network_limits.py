@@ -14,7 +14,8 @@ import download_engine
 from network_limits import NetworkLimits
 from settings import DEFAULTS, validate_settings
 from task_manager import TaskManager, TaskOptions
-from utils import DownloadCancelled, NO_WINDOW
+from errors import DownloadCancelled
+from process_utils import NO_WINDOW
 
 
 def wait_until(predicate):

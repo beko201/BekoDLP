@@ -21,7 +21,8 @@ from task_manager import TaskManager, TaskOptions
 from ui.exception_reporter import QtExceptionReporter
 from ui.main_window import MainWindow
 from qt_support import finish_window_close
-from utils import DownloadCancelled, NO_WINDOW, run_cmd_capture
+from errors import DownloadCancelled
+from process_utils import NO_WINDOW, run_cmd_capture
 
 
 class GateEngine:

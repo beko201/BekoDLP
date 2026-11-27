@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import download_engine
 import ytdlp_process
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 class YtDlpCompatibilityTests(unittest.TestCase):
