@@ -3,7 +3,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from copy import deepcopy
 
 from settings import DEFAULTS, SettingsStore
-from utils import configure_logging, log_warning
+from app_logging import configure_logging, log_warning
 
 
 class Preferences(QObject):

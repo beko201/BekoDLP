@@ -5,6 +5,7 @@ import time
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
 
+from task_state import TaskState, state_of, STOPPED_STATES
 from ui.i18n import register, tr
 
 ACTION_LABELS = {'none': 'Do nothing', 'folder': 'Open download folder', 'close': 'Close application',
@@ -40,7 +41,7 @@ class CompletionActions(QObject):
         if closing:
             return
         self.action = action
-        self.baseline = {tid for tid, task in tasks.items() if task['status'].startswith(('Completed', 'Error', 'Cancel'))}
+        self.baseline = {tid for tid, task in tasks.items() if state_of(task) in STOPPED_STATES}
         self.seen = set(tasks) - self.baseline
         self.timer.start()
 
@@ -67,11 +68,11 @@ class CompletionActions(QObject):
         tasks, busy, paused, closing = self.manager.completion_snapshot()
         current = {tid: task for tid, task in tasks.items() if tid not in self.baseline}
         self.seen.update(current)
-        if closing or self.seen - set(current) or any(t['status'].startswith(('Error', 'Cancel')) for t in current.values()):
+        if closing or self.seen - set(current) or any(state_of(t) in {TaskState.FAILED, TaskState.CANCELLING, TaskState.CANCELLED} for t in current.values()):
             self.cancel()
             return
-        ready = bool(current) and not busy and not paused and all(t['status'].startswith('Completed') for t in current.values())
-        fingerprint = tuple((tid, task['status'], task['output_path']) for tid, task in sorted(current.items()))
+        ready = bool(current) and not busy and not paused and all(state_of(t) == TaskState.COMPLETED for t in current.values())
+        fingerprint = tuple((tid, state_of(task), task['output_path']) for tid, task in sorted(current.items()))
         if self.deadline is not None and (not ready or fingerprint != self.fingerprint):
             self.cancel()
             return

@@ -6,22 +6,24 @@ import threading
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
 
 from task_manager import TaskOptions
-from utils import log_error, unexpected_traceback
-from utils import DownloadCancelled
+from app_logging import log_error, unexpected_traceback
+from errors import DownloadCancelled
+from task_state import TaskState, state_of, PENDING_STATES
 
 
 def task_status(task):
     """Present engine states as concise task-table labels."""
     status = task.get("status", "")
-    if status.startswith("Completed"):
+    state = state_of(task)
+    if state == TaskState.COMPLETED:
         return "Completed with warnings" if task.get("warnings") else "Completed"
-    if status.startswith("Error"):
+    if state == TaskState.FAILED:
         return "Failed (see details)"
-    if status == "Cancelled":
+    if state == TaskState.CANCELLED:
         return "Cancelled"
-    if status.startswith("Cancel"):
+    if state == TaskState.CANCELLING:
         return "Cancelling…"
-    if status == "Paused":
+    if state == TaskState.PAUSED:
         return "Paused"
     if status == 'Downloading selected section':
         return status
@@ -39,7 +41,7 @@ def task_status(task):
         return "Converting"
     if "Copying streams" in status:
         return "Remuxing"
-    if status.startswith(("Queu", "Wait")):
+    if state in PENDING_STATES:
         return "Queued"
     return {
         "downloading": "Downloading",

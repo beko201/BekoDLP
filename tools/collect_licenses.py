@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 from app_info import APP_NAME, APP_VERSION, UPDATE_REPOSITORY
 from tools.install_deno import VERSION as DENO_VERSION
 from ytdlp_process import require_executable, executable_version
-from utils import which_executable
+from runtime_tools import which_executable
 
 
 def digest(path):

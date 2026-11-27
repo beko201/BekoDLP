@@ -40,8 +40,8 @@ def main():
     from ui.main_window import MainWindow
     from ui.theme import apply_theme
     from ui.i18n import tr
-    from utils import NO_WINDOW
-    import utils
+    from process_utils import NO_WINDOW
+    import app_logging
 
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
@@ -68,10 +68,10 @@ def main():
 
     try:
         with tempfile.TemporaryDirectory(prefix="yd-qt-smoke-") as folder, \
-                patch.object(utils, 'ERROR_LOG_FILE', str(Path(folder, 'errors.log'))), \
-                patch.object(utils, 'DEBUG_LOG_FILE', str(Path(folder, 'debug.log'))), \
-                patch.object(utils, 'FALLBACK_DEBUG_LOG_FILE', str(Path(folder, 'debug-fallback.log'))), \
-                patch.object(utils, 'FALLBACK_ERROR_LOG_FILE', str(Path(folder, 'fallback.log'))):
+                patch.object(app_logging, 'ERROR_LOG_FILE', str(Path(folder, 'errors.log'))), \
+                patch.object(app_logging, 'DEBUG_LOG_FILE', str(Path(folder, 'debug.log'))), \
+                patch.object(app_logging, 'FALLBACK_DEBUG_LOG_FILE', str(Path(folder, 'debug-fallback.log'))), \
+                patch.object(app_logging, 'FALLBACK_ERROR_LOG_FILE', str(Path(folder, 'fallback.log'))):
             root = Path(folder)
             target = root / "downloads"
             target.mkdir()
@@ -160,7 +160,7 @@ def main():
                 table.view.sortByColumn(0, Qt.SortOrder.DescendingOrder)
                 table.view.selectRow(0)
                 app.processEvents()
-                with patch("ui.main_window.reveal_file") as reveal:
+                with patch("ui.window_tasks.reveal_file") as reveal:
                     menu = window.task_actions_menu
                     def choose_file_action():
                         menu.setActiveAction(window.show_file_action)

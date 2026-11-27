@@ -9,8 +9,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QHB
 from playlist_selection import PreviewCancellation, load_playlist_preview
 from resolved_info_cache import ResolvedInfoCache
 from naming_templates import uses_playlist_naming
+from cookie_options import cookie_error_guidance
 from ui.i18n import register, tr
-from utils import DownloadCancelled
+from errors import DownloadCancelled
 
 
 class PlaylistModel(QAbstractTableModel):
@@ -242,6 +243,9 @@ class PlaylistSelectionDialog(QDialog):
             self.playlist_title = title
         parts = warning.split('\n', 1)
         self.warning.setText(tr(parts[0]) + ('\n' + parts[1] if len(parts) > 1 else ''))
+        hint = cookie_error_guidance(warning)
+        if hint:
+            self.warning.setText(tr(hint) + '\n' + self.warning.text())
         if not self.model.checked and not warning:
             self.warning.setText(tr('No downloadable playlist videos were found.'))
         if self.model.entries:

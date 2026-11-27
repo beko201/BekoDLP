@@ -6,9 +6,10 @@ import re
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
+from task_state import TaskState, state_of
 from ui.task_controller import task_status
 from media_options import AUDIO_CODECS, CONTAINERS, VIDEO_CODECS
-from utils import format_eta
+from time_utils import format_eta
 from ui.i18n import duration_text, register, tr
 
 
@@ -16,7 +17,7 @@ SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 PROGRESS_ROLE = Qt.ItemDataRole.UserRole + 2
 
 TABLE_TASK_FIELDS = (
-    'id', 'url', 'title', 'format', 'quality', 'status', 'progress', 'warnings',
+    'id', 'url', 'title', 'format', 'quality', 'state', 'status', 'progress', 'warnings',
     'output_path', 'output_mode', 'container', 'video_codec', 'audio_codec',
     'audio_bit_depth', '_progress_stage', 'speed_bps', 'eta_seconds',
 )
@@ -64,8 +65,7 @@ def _make_row(tid, task):
     title = task.get("title", "")
     if title == "(resolving title...)":
         title = tr("Resolving title…")
-    raw_status = task.get("status", "")
-    downloading = raw_status.startswith("Downloading") and task.get("_progress_stage", "downloading") == "downloading"
+    downloading = state_of(task) == TaskState.DOWNLOADING and task.get("_progress_stage", "downloading") == "downloading"
     speed_bps, eta_seconds = task.get("speed_bps"), task.get("eta_seconds")
     speed = (speed_bps * 8 / 1e6 if downloading and isinstance(speed_bps, (int, float))
              and math.isfinite(speed_bps) and speed_bps >= 0 else -1)
@@ -156,7 +156,7 @@ class TaskTableModel(QAbstractTableModel):
         if column == 1:
             return row.display[1] + "\n" + row.snapshot.get("url", "")
         if column == 4:
-            if row.snapshot.get("status", "").startswith("Error") or row.snapshot["warnings"]:
+            if state_of(row.snapshot) == TaskState.FAILED or row.snapshot["warnings"]:
                 return tr('{status}. Right-click for diagnostic details.', status=row.display[4])
             if row.snapshot.get("output_path"):
                 return tr("Double-click to show the downloaded file in its folder.")

@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 from app_info import APP_VERSION, APP_NAME, APP_EXECUTABLE
 from package_layout import MANIFEST_NAME, file_sha256
 from updates import Release, StagedUpdate
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 def main():

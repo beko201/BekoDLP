@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QTableView, QVBoxLayout, QWidget,
 )
 
+from task_state import TaskState, state_of, STOPPED_STATES
 from ui.task_model import PROGRESS_ROLE, SORT_ROLE, TaskTableModel
 from ui.i18n import register
 
@@ -108,17 +109,17 @@ class TaskTable(QWidget):
         tasks = [self.model.task_for_id(selected) for selected in tids]
         self._context_menu.clear()
         show = self._context_menu.addAction("Show in folder")
-        show.setEnabled(bool(task and task.get("output_path") and task["status"].startswith("Completed")))
+        show.setEnabled(bool(task and task.get("output_path") and state_of(task) == TaskState.COMPLETED))
         show.triggered.connect(lambda: self.show_file_requested.emit(tid))
         details = self._context_menu.addAction("View diagnostics")
-        details.setEnabled(bool(task and (task["status"].startswith("Error") or task.get("warnings"))))
+        details.setEnabled(bool(task and (state_of(task) == TaskState.FAILED or task.get("warnings"))))
         details.triggered.connect(lambda: self.diagnostics_requested.emit(tid))
         self._context_menu.addSeparator()
         cancel = self._context_menu.addAction("Cancel selected")
-        cancel.setEnabled(any(t and not t["status"].startswith(("Completed", "Error", "Cancel")) for t in tasks))
+        cancel.setEnabled(any(t and state_of(t) not in STOPPED_STATES for t in tasks))
         cancel.triggered.connect(lambda: self.cancel_requested.emit(tids))
         retry = self._context_menu.addAction("Retry selected")
-        retry.setEnabled(any(t and t["status"].startswith("Error") for t in tasks))
+        retry.setEnabled(any(t and state_of(t) == TaskState.FAILED for t in tasks))
         retry.triggered.connect(lambda: self.retry_requested.emit(tids))
         register(self._context_menu)
         self._context_menu.popup(self.view.viewport().mapToGlobal(position))

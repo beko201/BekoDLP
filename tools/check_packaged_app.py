@@ -15,7 +15,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from utils import NO_WINDOW, which_executable
+from process_utils import NO_WINDOW
+from runtime_tools import which_executable
 from queue_store import QueueStore
 from subtitle_processing import read_cues
 from tools.install_ffmpeg import VERSION as EXPECTED_FFMPEG_VERSION

@@ -11,9 +11,14 @@ from shiboken6 import isValid
 
 from settings import SCHEMA_VERSION, _read_document
 from ui.help_texts import FIELD_HELP
+from cookie_options import BROWSER_COOKIE_COPY_HELP
 
 
 TR = {
+    BROWSER_COOKIE_COPY_HELP:
+        'Tarayıcının çerez veritabanı okunamadı. Tarayıcıyı arka plan işlemleri dahil tamamen kapatıp '
+        'yeniden deneyin. Sorun sürerse Çerez dosyası seçeneğini kullanarak Netscape biçiminde '
+        'bir cookies.txt dosyası seçin.',
     'Settings profile': 'Ayar profili', 'Saved settings profiles': 'Kayıtlı ayar profilleri',
     'Save profile…': 'Profili kaydet…', 'Save profile': 'Profili kaydet', 'Delete profile': 'Profili sil',
     'Custom settings': 'Özel ayarlar',
@@ -255,8 +260,8 @@ TR = {
     'Open log folder': 'Günlük klasörünü aç', 'Copy error details': 'Hata ayrıntılarını kopyala',
     'Export diagnostic report…': 'Tanılama raporunu dışa aktar…', 'Export diagnostic report': 'Tanılama raporunu dışa aktar',
     'Text files (*.txt)': 'Metin dosyaları (*.txt)', 'About BekoDLP': 'BekoDLP hakkında',
-    'BekoDLP\n\nAn independent video and audio downloader for YouTube and other sites supported by yt-dlp.\nInterface by PySide6. Media processing by FFmpeg.\nNot affiliated with the yt-dlp project.\n\nThis project was developed with AI using Claude and ChatGPT.':
-        'BekoDLP\n\nYouTube başta olmak üzere yt-dlp tarafından desteklenen siteler için bağımsız video ve ses indirici.\nArayüz: PySide6. Medya işleme: FFmpeg.\nyt-dlp projesiyle bağlantılı değildir.\n\nBu proje, Claude ve ChatGPT kullanılarak yapay zekâ ile geliştirilmiştir.',
+    'BekoDLP {version}\n\nAn independent video and audio downloader for YouTube and other sites supported by yt-dlp.\nInterface by PySide6. Media processing by FFmpeg.\nNot affiliated with the yt-dlp project.\n\nThis project was developed with AI using Claude and ChatGPT.':
+        'BekoDLP {version}\n\nYouTube başta olmak üzere yt-dlp tarafından desteklenen siteler için bağımsız video ve ses indirici.\nArayüz: PySide6. Medya işleme: FFmpeg.\nyt-dlp projesiyle bağlantılı değildir.\n\nBu proje, Claude ve ChatGPT kullanılarak yapay zekâ ile geliştirilmiştir.',
     'Paste one video or playlist URL per line.': 'Her satıra bir video veya oynatma listesi bağlantısı yapıştırın.',
     'Close': 'Kapat', '{count} link': '{count} bağlantı', '{count} links': '{count} bağlantı',
     'Clear task list': 'Görev listesini temizle', 'Cancel tasks': 'Görevleri iptal et',

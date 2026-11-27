@@ -12,7 +12,7 @@ from app_info import APP_NAME, APP_VERSION, UPDATE_REPOSITORY
 from ui.i18n import register, tr
 from updates import (MAX_RELEASE_BYTES, StagedUpdate, can_self_update, launch_update,
                      parse_release, release_api_url)
-from utils import log_warning
+from app_logging import log_warning
 
 
 class UpdateController(QObject):

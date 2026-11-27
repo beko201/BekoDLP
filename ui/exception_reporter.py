@@ -5,7 +5,8 @@ import traceback
 
 from PySide6.QtCore import QObject, Signal
 
-from utils import DownloadCancelled, log_error
+from errors import DownloadCancelled
+from app_logging import log_error
 
 
 class QtExceptionReporter(QObject):

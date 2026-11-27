@@ -7,12 +7,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogBut
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
-from cookie_options import cookie_kwargs
+from cookie_options import cookie_kwargs, cookie_error_guidance
 from network_options import network_kwargs
 from download_engine import fetch_ytinfo_with_retry
 from source_formats import downloadable, format_size, selected_sources
 from ui.i18n import register, tr
-from utils import DownloadCancelled, log_warning, normalize_url
+from errors import DownloadCancelled
+from app_logging import log_warning
+from url_utils import normalize_url
 
 
 HEADERS = ('Format ID', 'Stream type', 'Container', 'Resolution', 'FPS', 'Video codec', 'Audio codec',
@@ -162,7 +164,9 @@ class SourceFormatsDialog(QDialog):
             return
         self.refresh_button.setEnabled(True)
         if error or info is None:
-            self.status.setText(tr('Could not load source formats.') + ('\n' + error if error else ''))
+            hint = cookie_error_guidance(error)
+            self.status.setText(tr('Could not load source formats.') + ('\n' + tr(hint) if hint else '')
+                                + ('\n' + error if error else ''))
             return
         metadata = info._media_info.info
         if metadata.get('_type', 'video') != 'video' or not metadata.get('id'):

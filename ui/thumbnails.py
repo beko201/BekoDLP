@@ -10,7 +10,7 @@ from PySide6.QtGui import QImageReader
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkProxy, QNetworkReply, QNetworkRequest
 
 from network_options import network_selection, validate_network_options
-from utils import log_warning
+from app_logging import log_warning
 
 
 MAX_ACTIVE = 3

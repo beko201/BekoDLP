@@ -9,17 +9,22 @@ $deadline = [DateTime]::UtcNow.AddSeconds(60)
 $applicationWindow = $null
 while ([DateTime]::UtcNow -lt $deadline) {
     $candidate = Get-Process -Name 'BekoDLP' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $data.executable -and $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -eq 'BekoDLP' } | Select-Object -First 1
+        Where-Object { $_.Path -eq $data.executable } | Select-Object -First 1
     if ($candidate) {
-        $element = [System.Windows.Automation.AutomationElement]::FromHandle($candidate.MainWindowHandle)
-        if ($element.Current.Name -eq 'BekoDLP') {
-            $applicationWindow = $element
-            break
+        # Qt can expose an auxiliary window as Process.MainWindowHandle after an update.
+        $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+        foreach ($element in $windows) {
+            if ($element.Current.ProcessId -eq $candidate.Id -and $element.Current.Name -eq 'BekoDLP') {
+                $applicationWindow = $element
+                break
+            }
         }
+        if ($applicationWindow) { break }
     }
     Start-Sleep -Milliseconds 200
 }
 if (-not $applicationWindow) { throw 'The packaged application did not create a window.' }
+$applicationHandle = [IntPtr]$applicationWindow.Current.NativeWindowHandle
 
 function Find-Control([string]$Name) {
     $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $Name)
@@ -51,7 +56,7 @@ function Set-ControlValue([string]$Name, [string]$Value) {
 }
 
 try {
-    @{ name = $applicationWindow.Current.Name; type = $applicationWindow.Current.ControlType.ProgrammaticName; pid = $candidate.Id; handle = $candidate.MainWindowHandle.ToInt64() } |
+    @{ name = $applicationWindow.Current.Name; type = $applicationWindow.Current.ControlType.ProgrammaticName; pid = $candidate.Id; handle = $applicationHandle.ToInt64() } |
         ConvertTo-Json | Set-Content -LiteralPath ($data.report + '.window.json') -Encoding UTF8
     if ($applicationWindow.Current.Name -ne 'BekoDLP') { throw ('Unexpected window: ' + $applicationWindow.Current.Name) }
     if ($data.language -eq 'tr') {
@@ -166,6 +171,6 @@ try {
     }
 } finally {
     if ($data.close_after) {
-        [BekoWindowMessages]::PostMessage($candidate.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+        [BekoWindowMessages]::PostMessage($applicationHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     }
 }

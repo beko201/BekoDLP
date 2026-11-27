@@ -4,7 +4,7 @@ import threading
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
 
 from queue_store import QueueStore
-from utils import log_warning
+from app_logging import log_warning
 
 
 class QueuePersistence(QObject):

@@ -27,7 +27,8 @@ def run_scenario(name, seconds, count):
     from task_manager import TaskManager, TaskOptions
     from ui.task_controller import TaskController
     from ui.task_table import TaskTable
-    import utils
+    import app_logging
+    import process_utils
 
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
@@ -61,10 +62,10 @@ def run_scenario(name, seconds, count):
                 pass
 
     with tempfile.TemporaryDirectory(prefix='yd-resources-') as folder:
-        utils.ERROR_LOG_FILE = str(Path(folder, 'errors.log'))
-        utils.DEBUG_LOG_FILE = str(Path(folder, 'debug.log'))
-        utils.FALLBACK_DEBUG_LOG_FILE = str(Path(folder, 'debug-fallback.log'))
-        utils.FALLBACK_ERROR_LOG_FILE = str(Path(folder, 'fallback.log'))
+        app_logging.ERROR_LOG_FILE = str(Path(folder, 'errors.log'))
+        app_logging.DEBUG_LOG_FILE = str(Path(folder, 'debug.log'))
+        app_logging.FALLBACK_DEBUG_LOG_FILE = str(Path(folder, 'debug-fallback.log'))
+        app_logging.FALLBACK_ERROR_LOG_FILE = str(Path(folder, 'fallback.log'))
         manager = TaskManager()
         controller = TaskController(manager)
         table = TaskTable()
@@ -115,7 +116,7 @@ def run_scenario(name, seconds, count):
                 subprocess.run([manager.engine.ffmpeg, '-v', 'error', '-f', 'lavfi', '-i',
                                 'sine=frequency=440:duration=300', '-b:a', '320k', str(source)],
                                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                               **utils.NO_WINDOW)
+                               **process_utils.NO_WINDOW)
                 server = ThreadingHTTPServer(('127.0.0.1', 0), partial(Handler, directory=folder))
                 server.daemon_threads = False
                 threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .02}, daemon=True).start()

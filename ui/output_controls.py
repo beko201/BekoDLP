@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, Q
 
 from media_options import (AUDIO_BITRATES, AUTOMATIC_AUDIO_BITRATES, AUDIO_CODECS, AUDIO_CONTAINERS, CONTAINERS,
                            ENCODERS, VIDEO_CODECS, VIDEO_CONTAINERS, allowed_codecs, validate_output_options)
-from settings import (BITRATES, CODECS, DEFAULTS, MAX_WORKERS, MAX_VIDEO_WORKERS, MAX_FFMPEG_THREADS,
+from settings import (DEFAULTS, MAX_WORKERS, MAX_VIDEO_WORKERS, MAX_FFMPEG_THREADS,
                       MAX_FRAGMENT_DOWNLOADS, MAX_NETWORK_CONNECTIONS, QUALITIES)
 from ui.i18n import register, tr, translate_combo
 from ui.field_help import FieldHelpButton, FieldLabel
@@ -328,15 +328,14 @@ class OutputControls(QGroupBox):
 
     def values(self):
         mode = self.mode()
-        return dict(**self.cookies.values(), **self.subtitles.values(), **self.network.values(), **self.naming.values(), **self.cover.values(), **self.chapters.values(), **self.ranges.values(), output_mode=mode, format="MP3" if mode == "audio" else "MP4",
+        return dict(**self.cookies.values(), **self.subtitles.values(), **self.network.values(), **self.naming.values(), **self.cover.values(), **self.chapters.values(), **self.ranges.values(), output_mode=mode,
                     container=self.container_combo.currentData(),
                     video_codec=self.codec_combo.currentData() if mode == "video" else "original",
                     audio_codec=self.audio_codec_combo.currentData(),
                     audio_bit_depth=self.bit_depth_combo.currentData(),
                     video_quality=self.video_quality_combo.currentData(), audio_bitrate=self.bitrate_combo.currentData(),
                     trim_download_mode=self.trim_download_combo.currentData(),
-                    quality=self.quality_combo.currentText(), codec_mode=CODECS[0],
-                    mp3_bitrate=self.bitrate_combo.currentText() if self.bitrate_combo.currentText() in BITRATES else DEFAULTS["mp3_bitrate"])
+                    quality=self.quality_combo.currentText())
 
     def restore(self, data):
         combos = (self.format_combo, self.container_combo, self.codec_combo, self.audio_codec_combo,

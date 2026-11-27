@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from app_info import APP_NAME, APP_VERSION, APP_EXECUTABLE
 from package_layout import MANIFEST_NAME, MANAGED_ENTRIES, create_manifest, parse_manifest, file_sha256
-from utils import which_executable
+from runtime_tools import which_executable
 from tools.prepare_release_notices import consolidate
 from tools.windows_version import version_resource
 

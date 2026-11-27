@@ -8,7 +8,9 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QGridLayout, QLabel, Q
 
 import tool_updates as backend
 from ui.i18n import register, tr
-from utils import DownloadCancelled, which_executable, log_warning
+from errors import DownloadCancelled
+from runtime_tools import which_executable
+from app_logging import log_warning
 
 LABELS = {'ytdlp': 'yt-dlp', 'ffmpeg': 'FFmpeg / FFprobe', 'deno': 'Deno'}
 

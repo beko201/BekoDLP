@@ -14,7 +14,7 @@ import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from utils import NO_WINDOW
+from process_utils import NO_WINDOW
 
 
 def main():

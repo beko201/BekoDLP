@@ -1,32 +1,22 @@
 """English/Turkish Qt interface connected to the toolkit-independent task manager."""
 import os
-import threading
 from collections import deque
 from pathlib import Path
 
 from app_info import APP_NAME
 
 from PySide6.QtCore import Qt, QTimer, QSignalBlocker
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
-from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QComboBox,
-    QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
-    QSplitter, QStyle, QToolButton, QVBoxLayout, QWidget,
-)
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QStyle
 
 from media_options import validate_output_options
-from cookie_options import validate_cookie_options
+from cookie_options import validate_cookie_options, cookie_error_guidance
 from subtitle_options import validate_subtitle_options
 from network_options import validate_network_options
 from naming_templates import validate_naming_options
-from ui.output_controls import OutputControls
-from ui.options_scroll import OptionsScrollArea
 from ui.i18n import register, set_language, tr
-from ui.bulk_add_dialog import BulkAddDialog
-from ui.preview_panel import PreviewPanel
-from ui.task_table import TaskTable
 from ui.task_controller import TaskController
-from ui.file_actions import reveal_file, open_folder
+from ui.file_actions import open_folder
 from ui.diagnostics import (copy_error_details, open_log_folder, export_diagnostic_report,
                             add_diagnostic_buttons)
 from ui.preferences import Preferences
@@ -34,26 +24,23 @@ from ui.queue_persistence import QueuePersistence
 from ui.thumbnails import ThumbnailLoader
 from ui.updates import UpdateController
 from ui.tool_updates import ToolUpdateController
-from ui.completion_actions import CompletionActions, ACTION_LABELS
-from ui.source_formats_dialog import SourceFormatsDialog
-from ui.playlist_selection import PlaylistSelectionDialog
-from task_manager import TaskOptions
-from urllib.parse import urlsplit
-from utils import SETTINGS_FILE, log_warning, log_location_text
+from ui.completion_actions import CompletionActions
+from ui.window_layout import build_window, build_menus
+from ui.window_tasks import WindowTaskActions
+from ui.window_shutdown import WindowShutdown
+from app_paths import SETTINGS_FILE
+from app_logging import log_warning, log_location_text
 
 
 class MainWindow(QMainWindow):
     def __init__(self, manager, parent=None, *, settings_path=None):
         super().__init__(parent)
         self.controller = TaskController(manager, self)
-        self._closing = False
-        self._allow_close = False
-        self._update_on_close = False
+        self.shutdown_flow = WindowShutdown(self)
+        self.task_actions = WindowTaskActions(self)
         self._message_boxes = set()
         self._pending_messages = deque()
         self._last_error_details = ''
-        self._preferences_closed = False
-        self._queue_closed = False
         self._preview_tid = None
         self.language = 'en'
         self._notice_source = 'Ready'
@@ -67,111 +54,12 @@ class MainWindow(QMainWindow):
         self.bulk_dialog = None
         self.source_dialog = None
         self.playlist_dialog = None
-        central = QWidget(self)
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(20, 16, 20, 12)
-        layout.setSpacing(12)
-
-        heading = QLabel(APP_NAME, self)
-        heading.setObjectName("headingLabel")
-        layout.addWidget(heading)
-        note = QLabel("An independent video and audio downloader for YouTube and other sites supported by yt-dlp.", self)
-        note.setObjectName("mutedLabel")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
-        link_row = QHBoxLayout()
-        self.url_edit = QLineEdit(self)
-        self.url_edit.setPlaceholderText("Paste a video URL…")
-        self.url_edit.setAccessibleName("Video URL")
-        self.enqueue_button = QPushButton("Add to queue", self)
-        self.enqueue_button.setObjectName("primaryButton")
-        self.bulk_button = QPushButton("Add multiple links", self)
-        self.bulk_button.clicked.connect(self.open_bulk_dialog)
-        self.source_button = QPushButton('Source formats…', self)
-        self.source_button.clicked.connect(self.open_source_formats)
-        link_row.addWidget(self.url_edit, 1)
-        link_row.addWidget(self.enqueue_button)
-        link_row.addWidget(self.bulk_button)
-        link_row.addWidget(self.source_button)
-        layout.addLayout(link_row)
-
-        self.options_scroll = OptionsScrollArea(self._build_options(), central)
-        layout.addWidget(self.options_scroll)
-        folder_row = QHBoxLayout()
-        self.folder_edit = QLineEdit(self)
-        self.folder_edit.setReadOnly(True)
-        self.folder_edit.setPlaceholderText("No download folder selected")
-        self.folder_edit.setAccessibleName("Download folder")
-        self.folder_button = QPushButton("Choose folder", self)
-        self.folder_button.clicked.connect(self.choose_folder)
-        folder_row.addWidget(self.folder_edit, 1)
-        folder_row.addWidget(self.folder_button)
-        layout.addLayout(folder_row)
-
-        actions = QHBoxLayout()
-        self.pause_button = QPushButton("Pause", self)
-        self.cancel_action = QAction("Cancel selected", self)
-        self.retry_action = QAction("Retry failed tasks", self)
-        self.clear_button = QPushButton("Clear list…", self)
-        self.show_file_action = QAction("Show in folder", self)
-        self.diagnostics_action = QAction('View diagnostics', self)
-        self.task_actions_button = QToolButton(self)
-        self.task_actions_button.setText('Task actions')
-        self.task_actions_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.task_actions_menu = QMenu(self.task_actions_button)
-        self.task_actions_menu.addActions([self.cancel_action, self.retry_action])
-        self.task_actions_menu.addSeparator()
-        self.task_actions_menu.addActions([self.show_file_action, self.diagnostics_action])
-        self.task_actions_button.setMenu(self.task_actions_menu)
-        self.task_actions_menu.aboutToShow.connect(self._refresh_actions)
-        for button in (self.pause_button, self.clear_button, self.task_actions_button):
-            actions.addWidget(button)
-        actions.addStretch()
-        self.completion_combo = QComboBox(self)
-        self.completion_combo.setAccessibleName('When queue finishes')
-        for value, label in ACTION_LABELS.items():
-            self.completion_combo.addItem(label, value)
-        self.completion_combo.setToolTip('Runs only after all new tasks succeed. Power actions have a 30-second cancel countdown. Resets each session.')
-        actions.addWidget(QLabel('When queue finishes', self))
-        actions.addWidget(self.completion_combo)
+        build_window(self)
         self.finish_actions = CompletionActions(manager, self._perform_completion_action, self)
         self.finish_actions.reset_requested.connect(self._reset_completion_combo)
         self.finish_actions.message.connect(self._show_message)
         self.finish_actions.notice.connect(self._show_notice)
         self.completion_combo.currentIndexChanged.connect(lambda _: self.finish_actions.arm(self.completion_combo.currentData()))
-        layout.addLayout(actions)
-
-        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        self.task_table = TaskTable(self.splitter)
-        self.preview_panel = PreviewPanel(self.splitter)
-        self.splitter.addWidget(self.task_table)
-        self.splitter.addWidget(self.preview_panel)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setStretchFactor(0, 1)
-        self.splitter.setStretchFactor(1, 0)
-        self.splitter.setSizes([900, 260])
-        self.preview_panel.hide()
-        layout.addWidget(self.splitter, 1)
-        self.global_progress = QProgressBar(self)
-        self.global_progress.setValue(0)
-        self.global_progress.setAccessibleName("Overall progress")
-        layout.addWidget(self.global_progress)
-        self.statusBar().showMessage("Ready")
-        self.task_count_label = QLabel("0 tasks", self)
-        self.task_count_label.setObjectName("mutedLabel")
-        self.statusBar().addPermanentWidget(self.task_count_label)
-        for button, icon in ((self.enqueue_button, QStyle.StandardPixmap.SP_ArrowDown),
-                             (self.bulk_button, QStyle.StandardPixmap.SP_FileDialogListView),
-                             (self.folder_button, QStyle.StandardPixmap.SP_DirOpenIcon),
-                             (self.pause_button, QStyle.StandardPixmap.SP_MediaPause),
-                             (self.cancel_action, QStyle.StandardPixmap.SP_DialogCancelButton),
-                             (self.retry_action, QStyle.StandardPixmap.SP_BrowserReload),
-                             (self.clear_button, QStyle.StandardPixmap.SP_TrashIcon),
-                             (self.show_file_action, QStyle.StandardPixmap.SP_DirIcon)):
-            button.setIcon(self.style().standardIcon(icon))
-
         self.enqueue_button.clicked.connect(self.enqueue)
         self.url_edit.returnPressed.connect(self.enqueue)
         self.pause_button.clicked.connect(self.controller.toggle_pause)
@@ -189,8 +77,8 @@ class MainWindow(QMainWindow):
         self.controller.pause_changed.connect(self._pause_changed)
         self.controller.notice.connect(self._show_notice)
         self.controller.message.connect(self._show_message)
-        self.controller.shutdown_complete.connect(self._finish_close)
-        self.controller.shutdown_wait_required.connect(self._ask_shutdown_choice)
+        self.controller.shutdown_complete.connect(self.shutdown_flow.schedule_finish)
+        self.controller.shutdown_wait_required.connect(self.shutdown_flow.ask_choice)
         self.task_table.view.doubleClicked.connect(self._activate_task)
         self.task_table.selection_changed.connect(self._refresh_actions)
         self.task_table.selection_changed.connect(self._update_preview)
@@ -199,7 +87,7 @@ class MainWindow(QMainWindow):
         self.task_table.cancel_requested.connect(self._cancel_tasks)
         self.task_table.retry_requested.connect(self.controller.retry_failed)
         self._sync_format_controls()
-        self._build_menus()
+        build_menus(self)
         self.preferences.message.connect(self._show_message)
         self._restore_preferences()
         self._apply_processing_limits()
@@ -225,7 +113,7 @@ class MainWindow(QMainWindow):
                                              else settings_file.stem + '.queue.json')
         self.queue_persistence = QueuePersistence(manager, queue_path, self)
         self.queue_persistence.message.connect(self._show_message)
-        self.queue_persistence.closed.connect(self._finish_close, Qt.ConnectionType.QueuedConnection)
+        self.queue_persistence.closed.connect(self.shutdown_flow.schedule_finish, Qt.ConnectionType.QueuedConnection)
         restored = self.queue_persistence.load()
         self.controller.start(self.workers_spin.value())
         if restored:
@@ -249,36 +137,7 @@ class MainWindow(QMainWindow):
         del blocker
 
     def _perform_completion_action(self, action, paths):
-        if action == 'folder':
-            for folder in sorted({path if os.path.isdir(path) else os.path.dirname(path) for path in paths}):
-                if os.path.isdir(folder):
-                    open_folder(folder)
-        elif action == 'close':
-            self.close()
-        else:
-            if not self.preferences.flush():
-                return
-            manager = self.controller.manager
-            revision = manager.queue_revision
-            def perform():
-                from power_actions import run_power_action
-                try:
-                    run_power_action(action)
-                except (OSError, ValueError, RuntimeError) as error:
-                    log_warning('After-download power action failed', error)
-                    try:
-                        self.finish_actions.message.emit('warning', 'After-download action',
-                            'The after-download action could not be completed.', str(error))
-                    except RuntimeError:
-                        pass  # The application may have closed while Windows was suspended.
-            def saved(success):
-                if not success or self._closing:
-                    return
-                if manager.queue_revision != revision or manager.paused or manager.has_update_work():
-                    self._show_notice('After-download action cancelled.')
-                    return
-                threading.Thread(target=perform, name='after-download-power', daemon=True).start()
-            self.queue_persistence.flush(on_finished=saved)
+        return self.task_actions._perform_completion_action(action, paths)
 
     def _retranslate(self):
         self._pause_changed(self.controller.manager.paused)
@@ -294,61 +153,10 @@ class MainWindow(QMainWindow):
         self._notice_source = message
         self.statusBar().showMessage(tr(message), timeout)
 
-    def _build_menus(self):
-        file_menu = self.menuBar().addMenu("&File")
-        for text, shortcut, callback in (("Focus URL", "Ctrl+L", self.url_edit.setFocus),
-                                         ("Add multiple links…", "Ctrl+Shift+L", self.open_bulk_dialog),
-                                         ("Choose download folder…", "Ctrl+O", self.choose_folder)):
-            action = QAction(text, self)
-            action.setShortcut(QKeySequence(shortcut))
-            action.triggered.connect(callback)
-            file_menu.addAction(action)
-        file_menu.addSeparator()
-        self.quit_action = QAction("Quit", self)
-        self.quit_action.setShortcut(QKeySequence("Ctrl+Q"))
-        self.quit_action.triggered.connect(self.close)
-        file_menu.addAction(self.quit_action)
-        language_menu = self.menuBar().addMenu('Language')
-        language_group = QActionGroup(self)
-        language_group.setExclusive(True)
-        self.language_actions = {}
-        for code, label in (('en', 'English'), ('tr', 'Türkçe')):
-            action = language_menu.addAction(label)
-            action.setCheckable(True)
-            action.setData(code)
-            language_group.addAction(action)
-            action.triggered.connect(lambda checked=False, selected=code: self._change_language(selected))
-            self.language_actions[code] = action
-        help_menu = self.menuBar().addMenu("&Help")
-        self.help_menu = help_menu
-        self.open_log_action = help_menu.addAction('Open log folder', self.open_log_folder)
-        self.copy_error_action = help_menu.addAction('Copy error details', self.copy_error_details)
-        self.copy_error_action.setEnabled(False)
-        self.export_report_action = help_menu.addAction('Export diagnostic report…', self.export_diagnostic_report)
-        help_menu.addAction('Third-party licenses', self.show_licenses)
-        help_menu.addSeparator()
-        about = help_menu.addAction(f"About {APP_NAME}")
-        about.triggered.connect(lambda: self._show_message(
-            "information", f"About {APP_NAME}", f"{APP_NAME}\n\n"
-            "An independent video and audio downloader for YouTube and other sites supported by yt-dlp.\n"
-            "Interface by PySide6. Media processing by FFmpeg.\n"
-            "Not affiliated with the yt-dlp project.\n\n"
-            "This project was developed with AI using Claude and ChatGPT.", ""))
-
     def _pause_changed(self, paused):
         self.pause_button.setText(tr("Resume" if paused else "Pause"))
         self.pause_button.setIcon(self.style().standardIcon(
             QStyle.StandardPixmap.SP_MediaPlay if paused else QStyle.StandardPixmap.SP_MediaPause))
-
-    def _build_options(self):
-        self.output_controls = OutputControls(self)
-        for name in ("format_combo", "quality_combo", "container_combo", "codec_combo", "audio_codec_combo",
-                     "video_quality_combo", "bitrate_combo", "bit_depth_combo", "workers_spin", "video_workers_spin",
-                     "ffmpeg_threads_spin", "trim_start_edit", "trim_end_edit"):
-            setattr(self, name, getattr(self.output_controls, name))
-        for name in ("fragment_downloads_spin", "network_connections_spin"):
-            setattr(self, name, getattr(self.output_controls, name))
-        return self.output_controls
 
     def _sync_format_controls(self):
         self.output_controls.refresh()
@@ -439,257 +247,65 @@ class MainWindow(QMainWindow):
             self._schedule_preferences()
 
     def open_bulk_dialog(self):
-        if self._closing:
-            return
-        if self.bulk_dialog is None:
-            self.bulk_dialog = BulkAddDialog(self)
-            self.bulk_dialog.links_submitted.connect(self._submit_bulk_links)
-            self.bulk_dialog.playlist_requested.connect(self.open_playlist_selection)
-        self.bulk_dialog.open()
+        return self.task_actions.open_bulk_dialog()
 
     def open_playlist_selection(self, url):
-        if self._closing:
-            return
-        try:
-            parsed = urlsplit(url)
-            if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-                raise ValueError('Enter one playlist URL to choose which videos to download.')
-            if not self.folder or not os.path.isdir(self.folder):
-                raise ValueError('Choose an existing download folder first.')
-            options = TaskOptions(folder=self.folder, **self.output_controls.values(),
-                **self.output_controls.trim_values())
-            validate_cookie_options(self.output_controls.values(), check_file=True)
-        except ValueError as error:
-            self._show_message('warning', 'Choose playlist videos', str(error), '')
-            return
-        if self.playlist_dialog is not None:
-            self.playlist_dialog.reject()
-            self.playlist_dialog.deleteLater()
-        parent = self.bulk_dialog if self.bulk_dialog is not None and self.bulk_dialog.isVisible() else self
-        self.playlist_dialog = PlaylistSelectionDialog(self.controller.manager, url, options, parent)
-        self.playlist_dialog.queued.connect(self._playlist_queued)
-        self.playlist_dialog.open()
-        self.playlist_dialog.load()
+        return self.task_actions.open_playlist_selection(url)
 
     def _playlist_queued(self, url, added, skipped):
-        if self.bulk_dialog is not None and self.bulk_dialog.links() == [url]:
-            self.bulk_dialog.links_edit.clear()
-            self.bulk_dialog.accept()
-        self.controller.poll()
-        self._show_notice(tr('{added} selected videos queued; {skipped} already queued or repeated.', added=added, skipped=skipped))
+        return self.task_actions._playlist_queued(url, added, skipped)
 
     def open_source_formats(self):
-        if self._closing:
-            return
-        url = self.url_edit.text().strip()
-        try:
-            parsed = urlsplit(url)
-            if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-                raise ValueError('Enter a single video URL to inspect its formats.')
-            if not self.folder or not os.path.isdir(self.folder):
-                raise ValueError('Choose an existing download folder first.')
-            options = TaskOptions(folder=self.folder, **self.output_controls.values(),
-                **self.output_controls.trim_values())
-            validate_cookie_options(self.output_controls.values(), check_file=True)
-        except ValueError as error:
-            self._show_message('warning', 'Source formats', str(error), '')
-            return
-        if self.source_dialog is not None:
-            self.source_dialog.reject()
-            self.source_dialog.deleteLater()
-        self.source_dialog = SourceFormatsDialog(self.controller.manager, url, options, self)
-        self.source_dialog.queued.connect(self._source_queued)
-        self.source_dialog.open()
-        self.source_dialog.load()
+        return self.task_actions.open_source_formats()
 
     def _source_queued(self, url):
-        if self.url_edit.text().strip() == url:
-            self.url_edit.clear()
-        self.controller.poll()
-        self._show_notice('Selected source formats added to the queue.')
+        return self.task_actions._source_queued(url)
 
     def _submit_links(self, links, *, expand_playlist):
-        if self._closing:
-            return False
-        if not links:
-            self._validation_warning("Missing URL", "Enter a video URL first.")
-            return False
-        if not self.folder or not os.path.isdir(self.folder):
-            self._validation_warning("Download folder", "Choose an existing download folder first.")
-            return False
-        try:
-            validate_output_options(self.output_controls.values())
-        except ValueError as error:
-            self._validation_warning("Invalid output profile", str(error))
-            return False
-        try:
-            validate_cookie_options(self.output_controls.values(), check_file=True)
-        except ValueError as error:
-            self._validation_warning('Cookie settings', str(error))
-            return False
-        try:
-            validate_subtitle_options(self.output_controls.values())
-        except ValueError as error:
-            self._validation_warning('Subtitle settings', str(error))
-            return False
-        try:
-            validate_network_options(self.output_controls.values())
-        except ValueError as error:
-            self._validation_warning('Network settings', str(error))
-            return False
-        try:
-            validate_naming_options(self.output_controls.values())
-        except ValueError as error:
-            self._validation_warning('File and folder naming', str(error))
-            return False
-        try:
-            return self.controller.submit_links(
-                links, expand_playlist=expand_playlist, folder=self.folder,
-                **self.output_controls.values(),
-                **self.output_controls.trim_values())
-        except ValueError as error:
-            self._validation_warning(
-                "Invalid trim range",
-                "Use seconds, mm:ss or hh:mm:ss (for example, 90 or 1:30). "
-                "Values must be non-negative, and the end must be later than the start.", str(error))
-            return False
+        return self.task_actions._submit_links(links, expand_playlist=expand_playlist)
 
     def _validation_warning(self, title, text, details=''):
-        if title in ('Invalid trim range', 'Invalid output profile', 'Cookie settings', 'Subtitle settings', 'Network settings', 'File and folder naming'):
-            self.output_controls.advanced_toggle.setChecked(True)
-        log_warning(title, text, [('details', details)],
-                    once_key=('input_validation', title, text, details),
-                    event='input_validation_failed', component='qt')
-        self._show_message('warning', title, text, details)
+        return self.task_actions._validation_warning(title, text, details)
 
     def enqueue(self):
-        url = self.url_edit.text().strip()
-        if self._submit_links([url] if url else [], expand_playlist=False):
-            self.url_edit.clear()
+        return self.task_actions.enqueue()
 
     def _submit_bulk_links(self, links):
-        if self._submit_links(links, expand_playlist=True):
-            self.bulk_dialog.links_edit.clear()
-            self.bulk_dialog.accept()
+        return self.task_actions._submit_bulk_links(links)
 
     def cancel_selected(self):
-        tids = self.task_table.selected_task_ids()
-        if not tids:
-            self._show_message("information", "Select a task", "Select the tasks you want to cancel.", "")
-            return
-        self._cancel_tasks(tids)
+        return self.task_actions.cancel_selected()
 
     def _cancel_tasks(self, tids):
-        if self._closing:
-            return
-        cancellable = [tid for tid in tids if (task := self.controller.manager.get_task(tid))
-                       and not task["status"].startswith(("Completed", "Error", "Cancel"))]
-        if len(cancellable) > 1:
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Icon.Question)
-            box.setWindowTitle("Cancel tasks")
-            box.setText(tr('Cancel {count} selected tasks?', count=len(cancellable)))
-            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            box.setDefaultButton(QMessageBox.StandardButton.No)
-            box.finished.connect(lambda result: self.controller.cancel_tasks(cancellable)
-                                 if result == QMessageBox.StandardButton.Yes else None)
-            self._open_message(box)
-        else:
-            self.controller.cancel_tasks(cancellable)
+        return self.task_actions._cancel_tasks(tids)
 
     def retry_failed(self):
-        self.controller.retry_failed(self.task_table.selected_task_ids())
+        return self.task_actions.retry_failed()
 
     def clear_list(self):
-        if self._closing:
-            return
-        pending = self.controller.manager.summary().pending > 0
-        if not pending:
-            self.controller.clear_tasks()
-            return
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Clear task list")
-        box.setText(tr("Remove queued tasks as well?\n\n"
-                    "Yes: clear finished and queued tasks.\n"
-                    "No: clear only completed, failed and cancelled tasks.\n"
-                    "Active downloads and saved files are kept."))
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
-                               QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.No)
-        box.finished.connect(lambda result: self.controller.clear_tasks(
-            remove_pending=result == QMessageBox.StandardButton.Yes)
-            if result in (QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No) else None)
-        self._open_message(box)
+        return self.task_actions.clear_list()
 
     def _refresh_actions(self):
-        if self._closing:
-            return
-        manager = self.controller.manager
-        summary = manager.summary()
-        selected_ids = self.task_table.selected_task_ids()
-        selected = [task for tid in selected_ids if (task := manager.get_task(tid)) is not None]
-        self.cancel_action.setEnabled(any(not t["status"].startswith(("Completed", "Error", "Cancel"))
-                                          for t in selected))
-        retryable = (any(t["status"].startswith("Error") and manager.task_control(t["id"])[1] is None
-                         for t in selected) if selected_ids else summary.retryable > 0)
-        self.retry_action.setEnabled(retryable)
-        self.retry_action.setText(tr('Retry selected failed tasks' if selected_ids else 'Retry all failed tasks'))
-        self.show_file_action.setEnabled(len(selected) == 1 and
-                                         selected[0]["status"].startswith("Completed") and
-                                         bool(selected[0].get("output_path")))
-        self.clear_button.setEnabled(summary.clearable > 0)
-        self.pause_button.setEnabled(summary.total > 0 or manager.paused)
-        self.diagnostics_action.setEnabled(len(selected) == 1 and
-                                           (selected[0]['status'].startswith('Error') or bool(selected[0].get('warnings'))))
+        return self.task_actions._refresh_actions()
 
     def _update_summary(self, total, pending, progress):
         self.global_progress.setValue(progress)
         self.task_count_label.setText(tr('{total} task(s) • {pending} queued', total=total, pending=pending))
 
     def _activate_task(self, index):
-        tid = index.data(Qt.ItemDataRole.UserRole)
-        task = self.controller.manager.get_task(tid)
-        if task and task["status"].startswith("Completed"):
-            self.show_file(tid)
-        elif task:
-            self.show_task_details(tid)
+        return self.task_actions._activate_task(index)
 
     def show_selected_file(self):
-        tids = self.task_table.selected_task_ids()
-        if len(tids) == 1:
-            self.show_file(tids[0])
+        return self.task_actions.show_selected_file()
 
     def show_selected_diagnostics(self):
-        tids = self.task_table.selected_task_ids()
-        if len(tids) == 1:
-            self.show_task_details(tids[0])
+        return self.task_actions.show_selected_diagnostics()
 
     def show_file(self, tid):
-        if self._closing:
-            return
-        task = self.controller.manager.get_task(tid)
-        if not task or not task["status"].startswith("Completed"):
-            return
-        try:
-            reveal_file(task.get("output_path"))
-        except OSError as error:
-            log_warning("Could not reveal output file", error, [("task", tid)])
-            self._show_message("warning", "Could not show file",
-                               "The file may have been moved or deleted, or the file manager could not start.",
-                               str(error))
+        return self.task_actions.show_file(tid)
 
     def show_task_details(self, tid):
-        task = self.controller.manager.get_task(tid)
-        if task is None:
-            return
-        details = "\n".join(filter(None, [tr('Task: {value}', value=tid), tr('Attempt: {value}', value=task.get('attempt', 0)),
-                                         tr('Stage: {value}', value=task.get('_log_stage', 'resolve')),
-                                         task.get("status", ""), *task.get("warnings", [])]))
-        if task["status"].startswith("Error") or task.get("warnings"):
-            self._show_message("warning", "Task diagnostics",
-                               f"Diagnostic details for {tid}. Engine and provider messages are shown verbatim. "
-                               "Use the diagnostic actions to inspect or share the error context.", details)
+        return self.task_actions.show_task_details(tid)
 
     def copy_error_details(self):
         if not self._closing and self._last_error_details:
@@ -739,6 +355,7 @@ class MainWindow(QMainWindow):
         if self._message_boxes and not (self._preferences_closed and title == "Preferences warning"):
             self._pending_messages.append((kind, title, text, details))
             return
+        text = cookie_error_guidance(details) or cookie_error_guidance(text) or text
         box = QMessageBox(self)
         box.setProperty('_message_key', title)
         box.setIcon({"critical": QMessageBox.Icon.Critical, "warning": QMessageBox.Icon.Warning,
@@ -775,119 +392,46 @@ class MainWindow(QMainWindow):
             self._show_message(*self._pending_messages.popleft())
 
     def closeEvent(self, event):
-        if self._allow_close:
-            event.accept()
-            return
-        event.ignore()
-        if self._closing:
-            return
-        if self._update_on_close:
-            manager = self.controller.manager
-            if manager.has_update_work():
-                self._update_on_close = False
-                self.updater._info('Finish or cancel pending downloads before installing the update. The verified update is ready for this session.')
-                return
-            # Flushing may show a save warning. Keep preferences usable if
-            # installation is deferred rather than closing the application.
-            if not self._preferences_closed and not self.preferences.flush():
-                self._update_on_close = False
-                return
-            # Admission and the idle check share the task lock. A resolver or
-            # another producer cannot insert work between this check and close.
-            if not manager.close(require_idle=True):
-                self._update_on_close = False
-                self.updater._info('Finish or cancel pending downloads before installing the update. The verified update is ready for this session.')
-                return
-        if not self._preferences_closed:
-            self._preferences_closed = True
-            if not self.preferences.close():
-                # Keep the save error visible until acknowledged, then resume
-                # the ordinary asynchronous shutdown without retrying forever.
-                warning = next((box for box in self._message_boxes
-                                if box.property('_message_key') == "Preferences warning"), None)
-                if warning is None:
-                    self._show_message("warning", "Preferences warning",
-                                       "Your recent preferences could not be saved. "
-                                       "Click OK to continue closing.", "Use the log file location below for details.")
-                    warning = next(box for box in self._message_boxes
-                                   if box.property('_message_key') == "Preferences warning")
-                warning.finished.connect(lambda result: self.close())
-                return
-        self._closing = True
-        self.finish_actions.close()
-        if self.playlist_dialog is not None:
-            self.playlist_dialog.reject()
-        if self.source_dialog is not None:
-            self.source_dialog.reject()
-        self.queue_persistence.timer.stop()
-        self._pending_messages.clear()
-        self.updater.close(installing=self._update_on_close)
-        self.tool_updater.close()
-        self.thumbnails.close()
-        self.centralWidget().setEnabled(False)
-        if self.bulk_dialog is not None:
-            self.bulk_dialog.reject()
-        for box in list(self._message_boxes):
-            box.reject()
-        self._show_notice("Closing — cancelling tasks and cleaning up…", 0)
-        self.controller.begin_shutdown()
+        self.shutdown_flow.handle_close(event)
 
-    def _finish_close(self):
-        # finish_shutdown() may succeed inside closeEvent itself. Defer the
-        # accepted close until that ignored event has returned to Qt.
-        QTimer.singleShot(0, self._complete_close)
+    # Compatibility accessors for existing window integrations. Close state is
+    # owned exclusively by WindowShutdown.
+    @property
+    def _closing(self):
+        return self.shutdown_flow.closing
 
-    def _complete_close(self):
-        if self._allow_close:
-            return
-        if not self._queue_closed:
-            saved = self.queue_persistence.close()
-            if saved is None:
-                return
-            self._queue_closed = True
-            if not saved:
-                warning = next((box for box in self._message_boxes
-                                if box.property('_message_key') == 'Queue warning'), None)
-                if warning is None:
-                    self._show_message('warning', 'Queue warning',
-                        'Your queue could not be saved. Recent changes may not be restored next time.', '')
-                    warning = next(box for box in self._message_boxes
-                                   if box.property('_message_key') == 'Queue warning')
-                warning.finished.connect(lambda result: self._complete_close())
-                return
-        if self._update_on_close:
-            try:
-                self.updater.apply_on_exit()
-            except (OSError, ValueError) as error:
-                # The old executable is untouched if the helper cannot start.
-                self._update_on_close = False
-                self.updater.close()
-                log_warning('Could not start update helper', error, event='update_failed', component='updater')
-                box = QMessageBox(self)
-                box.setWindowTitle(tr('Software update'))
-                box.setText(tr('The update could not be completed. Your current version is unchanged.'))
-                box.setDetailedText(str(error))
-                box.finished.connect(lambda result: self._complete_close())
-                self._open_message(box)
-                return
-        self._allow_close = True
-        for box in list(self._message_boxes):
-            box.reject()
-        self.close()
+    @_closing.setter
+    def _closing(self, value):
+        self.shutdown_flow.closing = value
 
-    def _ask_shutdown_choice(self):
-        box = QMessageBox(self)
-        box.setWindowTitle("Some tasks have not stopped")
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText(tr(
-            "Cancellation and process termination have timed out. Close now?\n\n"
-            "Completed files are preserved, but partial files may remain.\n\n"
-            "Choose No to wait another {seconds} seconds.", seconds=f'{self.controller.manager.shutdown_grace_seconds:g}'))
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        box.setDefaultButton(QMessageBox.StandardButton.No)
-        box.finished.connect(self._shutdown_choice)
-        self._open_message(box)
+    @property
+    def _allow_close(self):
+        return self.shutdown_flow.allow_close
 
-    def _shutdown_choice(self, result):
-        if not self._allow_close:
-            self.controller.resolve_shutdown_choice(result == QMessageBox.StandardButton.Yes)
+    @_allow_close.setter
+    def _allow_close(self, value):
+        self.shutdown_flow.allow_close = value
+
+    @property
+    def _update_on_close(self):
+        return self.shutdown_flow.update_on_close
+
+    @_update_on_close.setter
+    def _update_on_close(self, value):
+        self.shutdown_flow.update_on_close = value
+
+    @property
+    def _preferences_closed(self):
+        return self.shutdown_flow.preferences_closed
+
+    @_preferences_closed.setter
+    def _preferences_closed(self, value):
+        self.shutdown_flow.preferences_closed = value
+
+    @property
+    def _queue_closed(self):
+        return self.shutdown_flow.queue_closed
+
+    @_queue_closed.setter
+    def _queue_closed(self, value):
+        self.shutdown_flow.queue_closed = value

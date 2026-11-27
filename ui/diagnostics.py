@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from diagnostics import build_diagnostic_report, save_diagnostic_report
 from ui.file_actions import open_folder
-from utils import _log_text, get_log_status
+from app_logging import _log_text, get_log_status
 from ui.i18n import tr
 
 
